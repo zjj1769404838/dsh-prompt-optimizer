@@ -66,20 +66,43 @@ pnpm test                # 依次跑 gates + 四个回归 + 市场索引校验
 
 ## 发布到插件市场
 
-DSH 插件市场是一份 **format 1 的 JSON 索引**，用户在自己的 profile 里配置这个 JSON 的 URL，不是托管平台。发布分三步：
+DSH 插件市场是一份 **format 1 的 JSON 索引**，用户在自己的 profile 里配置这个 JSON 的 URL，不是托管平台。
+
+**当前发布方式：git 源**（本机无 npm 登录态也能发，`dsh` CLI 会直接 `git+https://…git#<commit>` 安装）：
 
 ```sh
 npm test                      # 全绿后再发
-npm pack --dry-run            # 13 个文件，确认没有宿主专有代码
-npm publish                   # publishConfig.access=public 已写好，scoped 包必须它
-npm run market-index          # → docs/market-index.json（内含 icon 的 base64 data URL）
+git add -A && git commit      # 先把要发的代码提交（commit 会被写进索引）
+npm run market-index          # → docs/market-index.json，source 为 {type:'git', url, commit}
+git add docs/market-index.json && git commit && git push
 ```
 
-把 `docs/market-index.json` 托管到任意可公网访问的静态地址（GitHub Pages / jsDelivr / 自己的域名），用户在 `cordis.patch.yml` 的 `plugin-market.indexes` 里追加该 URL 即可看到。
+索引里 `source.commit` 就是 `git rev-parse HEAD` 的结果，所以**先提交代码、再生成索引、再提交索引**这个顺序不能反。要改发布点可覆盖：
+
+```sh
+MARKET_GIT_URL=https://github.com/<owner>/<repo>.git \
+MARKET_GIT_COMMIT=<40位sha> npm run market-index
+```
+
+**走 npm 源**（需要先 `npm login`）时加 `--npm`：
+
+```sh
+npm publish                   # publishConfig.access=public 已写好，scoped 包必须它
+npm run market-index -- --npm # source 变成 {type:'npm'}
+```
+
+把 `docs/market-index.json` 托管到任意可公网访问的静态地址。实测可用的两种：
+
+- **jsDelivr**（推荐，带 CDN 缓存，按 `@main` 或 `@<tag>` 取）：
+  `https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/docs/market-index.json`
+- **raw.githubusercontent.com**（**有约 5 分钟 CDN 延迟**，刚推完立刻取会拿到上一版）
+
+用户在 `cordis.patch.yml` 的 `plugin-market.indexes` 里追加该 URL 即可看到。
 
 - `scripts/market-index.mjs` 从 `package.json` + `icon.svg` 生成索引，并在写盘前用宿主自己的 `parseMarketIndex` 校验；校验器路径可用 `DSH_APP_DIR` 或 `DSH_MARKET_INDEX_PKG` 覆盖。
-- 索引里的 `publishTimestamp` 必须是 **Unix 秒**（写毫秒会被拒），当前取生成时刻；正式发布可换成 `npm view @zjj/dsh-prompt-optimizer time.<version>` 的真实时间。
+- 索引里的 `publishTimestamp` 必须是 **Unix 秒**（写毫秒会被拒），当前取生成时刻。
 - 兼容性只由 `engines.dsh` 决定，见上一节。
+- `docs/` 不进 npm 包（`files` 白名单里没有它），索引只从仓库托管；避免包内留一份会漂移的旧副本。
 
 ## 架构
 

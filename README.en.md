@@ -66,20 +66,43 @@ pnpm test                # gates + the four regression suites + market index che
 
 ## Publishing to the plugin market
 
-The DSH plugin market is a **format 1 JSON index**, not a hosting platform: users point their profile at the index URL. Three steps:
+The DSH plugin market is a **format 1 JSON index**, not a hosting platform: users point their profile at the index URL.
+
+**Current route: git source** (works without an npm login; the `dsh` CLI installs straight from `git+https://…git#<commit>`):
 
 ```sh
 npm test                      # green first
-npm pack --dry-run            # 13 files, no host-proprietary code
-npm publish                   # publishConfig.access=public is already set (required for scoped packages)
-npm run market-index          # → docs/market-index.json (icon inlined as a base64 data URL)
+git add -A && git commit      # commit the code to ship — this commit goes into the index
+npm run market-index          # → docs/market-index.json with source {type:'git', url, commit}
+git add docs/market-index.json && git commit && git push
 ```
 
-Host `docs/market-index.json` anywhere publicly reachable (GitHub Pages / jsDelivr / your own domain) and add that URL to `plugin-market.indexes` in the user's `cordis.patch.yml`.
+`source.commit` is `git rev-parse HEAD`, so the order **commit code → generate index → commit index** cannot be reversed. Override the target with:
+
+```sh
+MARKET_GIT_URL=https://github.com/<owner>/<repo>.git \
+MARKET_GIT_COMMIT=<40-char sha> npm run market-index
+```
+
+**npm route** (needs `npm login` first) — pass `--npm`:
+
+```sh
+npm publish                   # publishConfig.access=public is already set (required for scoped packages)
+npm run market-index -- --npm # source becomes {type:'npm'}
+```
+
+Host `docs/market-index.json` anywhere publicly reachable. Two verified options:
+
+- **jsDelivr** (recommended, CDN-cached, addressable by `@main` or `@<tag>`):
+  `https://cdn.jsdelivr.net/gh/<owner>/<repo>@main/docs/market-index.json`
+- **raw.githubusercontent.com** (**~5 min CDN lag** — a fetch right after pushing returns the previous version)
+
+Then add that URL to `plugin-market.indexes` in the user's `cordis.patch.yml`.
 
 - `scripts/market-index.mjs` builds the index from `package.json` + `icon.svg` and validates it with the host's own `parseMarketIndex` before writing. Override the validator path with `DSH_APP_DIR` or `DSH_MARKET_INDEX_PKG`.
-- `publishTimestamp` must be **Unix seconds** (milliseconds are rejected). It currently uses generation time; for a real release use `npm view @zjj/dsh-prompt-optimizer time.<version>`.
+- `publishTimestamp` must be **Unix seconds** (milliseconds are rejected). It currently uses generation time.
 - Compatibility is decided solely by `engines.dsh` (see above).
+- `docs/` is not published to npm (absent from the `files` whitelist): the index is hosted from the repo only, so no drifting stale copy ships inside the tarball.
 
 ## Architecture
 
