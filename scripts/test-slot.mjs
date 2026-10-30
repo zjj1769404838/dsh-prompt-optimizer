@@ -209,6 +209,24 @@ if (btn) {
   check('按钮/click 已绑定', (btn.listeners.click ?? []).length === 1, 'no handler')
 }
 
+// ─── 取消能力：按钮在运行期要能变成「停止」 ───
+// 一次优化最长 45s，中途改主意必须有出口。这里钉住三条不变量：
+//   ① 客户端导出 hasActiveOptimize / cancelActiveOptimize（状态可查、可停）；
+//   ② 按钮上绑了 keydown（Esc 也能停，不用挪鼠标）；
+//   ③ 按钮初始文案是「优化」，运行期由 setButtonRunning 切成「停止」。
+check('取消/导出 hasActiveOptimize', typeof mod.hasActiveOptimize === 'function', typeof mod.hasActiveOptimize)
+check('取消/导出 cancelActiveOptimize', typeof mod.cancelActiveOptimize === 'function', typeof mod.cancelActiveOptimize)
+check('取消/空闲时无活动运行', mod.hasActiveOptimize() === false, String(mod.hasActiveOptimize()))
+check('取消/空闲时取消返回 false', mod.cancelActiveOptimize() === false, String(mod.cancelActiveOptimize()))
+if (btn) {
+  check('取消/按钮绑了 keydown（Esc 停止）', (btn.listeners.keydown ?? []).length === 1, 'no handler')
+  const label = btn.childNodes.find((n) => (n.attrs?.get('class') ?? '') === 'po-btn-label')
+  // innerHTML 建的是字符串，垫片里拿不到子节点；退而校验文案在 html 里且可被 querySelector 替换
+  check('取消/按钮初始文案是「优化」', btn.innerHTML.includes('>优化<'), btn.innerHTML.slice(-40))
+  check('取消/初始不处于运行态', btn.dataset.poRunning === undefined, String(btn.dataset.poRunning))
+  if (label) check('取消/label 节点存在', label.textContent === '优化', label.textContent)
+}
+
 // ─── 没有 slots 能力时必须退回 DOM 兜底，而不是静默没有按钮 ───
 {
   let fellBack = false

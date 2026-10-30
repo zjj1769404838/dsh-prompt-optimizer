@@ -2,6 +2,31 @@
 
 本文件记录 `@zjj/dsh-prompt-optimizer` 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.8] — 2026-10-30
+
+### 修复
+
+- **等待期间用户新写的内容会被整段覆盖**。模型最慢要等 45 秒，这期间用户很可能已在同一输入框继续打字；原实现拿到结果后无条件 `setText`，把新内容冲掉。现在写回前重读输入框并与点击时的快照比对（`trim` 后纯文本，芯片不计入），不一致就丢弃结果并提示「输入内容已变化，本次优化结果已丢弃」。
+- **切走窗口后按钮永久卡在加载态**。`nextSelectionTick` 用双层 `requestAnimationFrame`，而 Chrome 在不可见标签页会完全停发 rAF，Promise 永不 resolve → 写回卡死 → `btn.disabled = true` 再也回不来。现在加 50ms `setTimeout` 兜底，正常路径仍优先 rAF（选区同步语义不变）。
+- **模型输出被 token 上限截断后仍写回**。`LLM_MAX_TOKENS = 2048`，长输入改写很容易超；原实现 `collectText` 只看 `text-delta`、丢掉 `finish` 分片，截断的半句被 `sanitize` 后当成品写回，用户会拿着断头提示词去问模型。现在识别 `finishReason ∈ {length, max_tokens, max-tokens, max_output_tokens, content_filter}` 判为失败，回退本地规则引擎。
+- **`Origin: null` 被当成「无 Origin」放行**。`null` 是沙箱 iframe、`data:` 页面、部分跨源重定向会发的值，属跨站来源；早期与「非浏览器客户端」归成一类，等于任意被嵌入页面都能 `fetch` 本地 `/optimize` 白嫖模型额度。现在明确拒绝（真正的脚本客户端根本不发这个头）。
+- **幂等判据误伤用户自己写的结构化稿**。原判据只要「≥2 个 Markdown 标题 + 命中 ≥2 个段落关键词」，用户写 `## 背景` + `## 输出` 就被判成「已是结构化提示词」直接拒绝润色。阈值提到 3（本插件两条路径的产物都稳定命中 3+）。
+
+### 新增
+
+- **可中途停止**：等待期间同一个按钮从「优化」切成「停止」（魔法棒转成旋转态），点击它或按 **Esc** 即中止本次优化，输入框保持原样。取消不是失败，提示用中性色且不记 `optimize-error` 信标。实现上前后端贯通：客户端 `abort` 掉 `fetch`，服务端监听 `req`/`res` 的 `close` 感知连接断开，随即 `AbortController.abort()` 掐断模型流，**并且不回退本地规则**——用户按了停止却看到输入框被改写，等于取消按钮骗人。运行期刻意不用 `btn.disabled`（disabled 收不到 click，就没法停止），改用 `data-po-running` 标记 + 文案切换表达状态。
+- **写回后可撤销**：成功提示带「撤销」按钮（5 秒窗口），点击把点击时读到的原文连同芯片快照写回。此前只能靠编辑器自身的 Ctrl+Z。
+- **错误提示分档**：超时（60s）/ 403 跨站 / 413 过长 / 404 接口缺失 / 5xx 内部错误 / 其他，各自独立文案，不再糊成一句「接口不可用」。`optimizeRequest` 的 `Error` 上带 `status` 供调用方判断。
+- **toast 无障碍与主题适配**：加 `role="status"` + `aria-live="polite"`（读屏软件能播报结果）；背景/前景改用宿主主题变量 `--dsw-alias-bg-elevated` / `--dsw-alias-label-primary`，浅色主题下不再是突兀的深色块。
+- 信标新增 `optimize-stale`（并发丢弃）与 `optimize-error` 的 `forbidden` / `too-large` / `not-found` / `server` 细分原因。
+
+### 测试
+
+- `test-hardening.mjs` 从 26 条加到 35 条：新增 `Origin: null` 拒绝、用户两段结构稿照常优化、截断回退 local、正常 `stop` 仍走 llm 四类断言，以及取消链路的 `连接断开触发中止` / `取消不回退本地规则` / `取消后原文未被改写` / `正常结束不误报取消` 四类断言。垫片补 `once`/`emit` 与 `closeAfterMs`——原垫片的 `res` 没有 `once`，服务端 `res.once('close')` 感知断开的链路在测试里根本不触发，会假绿。
+- `test-slot.mjs` 从 21 条加到 28 条：新增 `hasActiveOptimize` / `cancelActiveOptimize` 导出、空闲态分别为 `false`/`false`、按钮绑定 `keydown`（Esc 停止）、初始文案含「优化」、初始不带 `data-po-running`。
+- 修掉测试垫片的一个假通过：`makeCtx` 每次 `get('llm')` 都返回新对象，事后覆盖 `stream` 改的是丢弃的副本，导致截断用例读到的仍是默认 stream。改为构造时注入 `streamOverride`。
+- 全量：**gates ok · hardening 35/35 · chips 18/18 · slot 28/28 · market-index ok**。
+
 ## [0.1.7] — 2026-10-30
 
 ### 变更

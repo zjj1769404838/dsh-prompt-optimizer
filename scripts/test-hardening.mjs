@@ -2,7 +2,9 @@
 // 不依赖真实 DSH 进程，用模拟 host 直接驱动 handler。
 import { apply } from '../lib/index.js'
 
-function makeCtx(llmPresent = false) {
+// streamOverride 必须在构造时注入：get('llm') 每次返回新对象，
+// 事后改 ctx.get('llm').stream 改到的是丢弃的副本，测试会假通过。
+function makeCtx(llmPresent = false, streamOverride = null) {
   const handlers = []
   const ctx = {
     handlers,
@@ -15,9 +17,11 @@ function makeCtx(llmPresent = false) {
           listProviders: () => [{ id: 'deepseek-official' }],
           listModels: async () => [{ id: 'deepseek-v4-flash' }],
           resolveModelInfo: async () => ({ reasoning: { efforts: [{ id: 'low' }] } }),
-          stream() {
+          stream(opts) {
+            if (typeof streamOverride === 'function') return streamOverride(opts)
             return (async function* () {
               yield { type: 'text-delta', text: 'LLM 结果' }
+              yield { type: 'finish', reason: 'stop' }
             })()
           },
         }
@@ -32,7 +36,7 @@ function makeCtx(llmPresent = false) {
 }
 
 let seq = 0
-async function call(ctx, { path = '/optimize', method = 'POST', payload, headers = {}, rawBody, chunkSize } = {}) {
+async function call(ctx, { path = '/optimize', method = 'POST', payload, headers = {}, rawBody, chunkSize, closeAfterMs } = {}) {
   // 每次调用前重新 apply：同时把模块级 ctxRef 指向当前 ctx（llm 读取走 ctxRef）
   apply(ctx)
   const handler = ctx.handlers[0].handler
@@ -42,6 +46,10 @@ async function call(ctx, { path = '/optimize', method = 'POST', payload, headers
     headers: {},
     writeHead(status, h) { this.statusCode = status; this.headers = h },
     end(buf) { body = Buffer.from(buf ?? '').toString('utf8') },
+    // 服务端靠 res/req 的 'close' 感知「浏览器断开」（用户点了停止）。
+    // 垫片必须支持 once，否则那条取消链路在测试里根本不会触发。
+    once(ev, cb) { (this.listeners ??= {}); (this.listeners[ev] ??= []).push(cb) },
+    emit(ev) { for (const cb of (this.listeners?.[ev] ?? [])) cb() },
   }
   const buf = rawBody !== undefined
     ? Buffer.from(rawBody, 'utf8')
@@ -52,6 +60,8 @@ async function call(ctx, { path = '/optimize', method = 'POST', payload, headers
     method,
     headers: { host: '127.0.0.1:58421', ...headers },
     on(ev, cb) { (listeners[ev] ??= []).push(cb) },
+    once(ev, cb) { (req.onceListeners ??= {}); (req.onceListeners[ev] ??= []).push(cb) },
+    emit(ev) { for (const cb of (req.onceListeners?.[ev] ?? [])) cb() },
     destroy() { req.destroyed = true },
   }
   const p = handler(req, res)
@@ -62,6 +72,12 @@ async function call(ctx, { path = '/optimize', method = 'POST', payload, headers
     if (req.destroyed) break
   }
   if (!req.destroyed) for (const cb of listeners.end ?? []) cb()
+  // 模拟浏览器中途断开（点「停止」/ 关标签页）
+  if (closeAfterMs !== undefined) {
+    await new Promise((r) => setTimeout(r, closeAfterMs))
+    req.emit('close')
+    res.emit('close')
+  }
   await p
   let json = null
   try { json = JSON.parse(body) } catch { /* 非 JSON 响应 */ }
@@ -103,6 +119,13 @@ const plain = '## 背景\n我在做一个爬虫项目，需要抓取公开数据
 const lp = await call(makeCtx(false), { payload: { text: plain, mode: 'local' } })
 check('幂等LLM/单标题不误判', lp.json.ok === true, JSON.stringify(lp.json).slice(0, 120))
 
+// ── 1c. 用户自己写的两段结构稿必须照常润色，不能被判成「已是结构化」──
+// 这是 0.1.7 的真实误伤：判据只要 2 个标题 + 2 个关键词，
+// 用户写 `## 背景` + `## 输出` 就被直接拒绝优化。阈值已提到 3。
+const userOwn = '## 背景\n我要做一个内部工具。\n\n## 输出\n给我一份方案。'
+const uo = await call(makeCtx(false), { payload: { text: userOwn, mode: 'local' } })
+check('幂等/用户两段结构稿照常优化', uo.json.ok === true, JSON.stringify(uo.json).slice(0, 160))
+
 // ── 2. 请求体上限 413 ──
 const big = 'x'.repeat(300 * 1024)
 const bigRes = await call(ctx, { payload: { text: big }, chunkSize: 64 * 1024 })
@@ -131,6 +154,15 @@ const crossSiteOnly = await call(ctx, {
 })
 check('403/仅 Sec-Fetch-Site 跨站也拒', crossSiteOnly.status === 403, `status=${crossSiteOnly.status}`)
 
+// ── 3b. `Origin: null` 必须拒 ──
+// 沙箱 iframe / data: 页面 / 部分跨源重定向都会发 Origin: null。
+// 早期把它与「无 Origin」归成一类直接放行，等于任意被嵌入页面都能白嫖本地模型额度。
+const nullOrigin = await call(ctx, {
+  payload: { text: '帮我写个爬虫' },
+  headers: { origin: 'null' },
+})
+check('403/Origin null 被拒', nullOrigin.status === 403, `status=${nullOrigin.status}`)
+
 // ── 4. 信标字段白名单：文本内容必须被丢弃 ──
 const beaconCtx = makeCtx(false)
 await call(beaconCtx, {
@@ -157,6 +189,62 @@ const longCtx = makeCtx(true)
 const longRes = await call(longCtx, { payload: { text: '请帮我写一个爬虫。'.repeat(1200) } })
 check('超长/降级 local', longRes.json?.mode === 'local', `mode=${longRes.json?.mode}`)
 check('超长/带 note', typeof longRes.json?.note === 'string' && longRes.json.note.includes('8000'), String(longRes.json?.note))
+
+// ── 5b. 模型输出被截断时不许写回，必须回退本地规则 ──
+// finishReason=length 说明 2048 token 上限切断在半句。
+// 早期只看 text-delta、丢掉 finish 分片，截断的半句会被 sanitize 后当成品写回。
+{
+  // 先吐半句，再报 length（= token 上限截断）
+  const truncCtx = makeCtx(true, () => (async function* () {
+    yield { type: 'text-delta', text: '## 角色\n你是一名资深' }
+    yield { type: 'finish', reason: 'length' }
+  })())
+  const truncRes = await call(truncCtx, { payload: { text: '帮我写个爬虫，要能抓取公开数据并导出 CSV' } })
+  check('截断/回退 local', truncRes.json?.mode === 'local', `mode=${truncRes.json?.mode}`)
+  check('截断/不写入半句', !String(truncRes.json?.text ?? '').includes('你是一名资深'), String(truncRes.json?.text ?? '').slice(0, 60))
+}
+
+// ── 5c. finishReason=stop 的正常产物必须照常走 LLM ──
+{
+  const okCtx = makeCtx(true, () => (async function* () {
+    yield { type: 'text-delta', text: '## 角色\n你是爬虫工程师。\n\n## 任务目标\n抓取公开数据。' }
+    yield { type: 'finish', reason: 'stop' }
+  })())
+  const okRes = await call(okCtx, { payload: { text: '帮我写个爬虫，要能抓取公开数据并导出 CSV' } })
+  check('截断/正常结束仍走 llm', okRes.json?.mode === 'llm', `mode=${okRes.json?.mode}`)
+}
+
+// ── 5d. 用户点「停止」：浏览器断开必须中止模型流，且**不回退本地规则** ──
+// 取消的语义是「我不要这个结果了」。若断开后仍跑本地规则并把结果写回，
+// 用户明明按了停止却看到输入框被改，等于取消按钮骗人。
+{
+  const abortErr = () => Object.assign(new Error('aborted'), { name: 'AbortError' })
+  const hangCtx = makeCtx(true, (opts) => (async function* () {
+    yield { type: 'text-delta', text: '## 角色\n你是一名资深' }
+    // 永不结束，直到 signal 被 abort —— 模拟模型还在流式输出时用户点了停止
+    await new Promise((_, reject) => {
+      if (!opts.signal) return
+      if (opts.signal.aborted) return reject(abortErr())
+      opts.signal.addEventListener('abort', () => reject(abortErr()), { once: true })
+    })
+  })())
+  const rawText = '帮我写个爬虫，要能抓取公开数据并导出 CSV'
+  const abortedRes = await call(hangCtx, { payload: { text: rawText }, closeAfterMs: 30 })
+  check('取消/连接断开触发中止', abortedRes.json?.aborted === true, JSON.stringify(abortedRes.json).slice(0, 160))
+  check('取消/不回退本地规则', abortedRes.json?.mode === 'none', `mode=${abortedRes.json?.mode}`)
+  check('取消/原文未被改写', abortedRes.json?.text === rawText, String(abortedRes.json?.text ?? '').slice(0, 60))
+}
+
+// ── 5e. 连接正常结束（没断开）时不能误判成「取消」──
+// 取消判据是 clientGone 标志，不是「异常」。这条防的是把普通异常一律说成用户取消。
+{
+  const okCtx2 = makeCtx(true, () => (async function* () {
+    yield { type: 'text-delta', text: '## 角色\n你是爬虫工程师。\n\n## 任务目标\n抓取公开数据。' }
+    yield { type: 'finish', reason: 'stop' }
+  })())
+  const normalRes = await call(okCtx2, { payload: { text: '帮我写个爬虫，要能抓取公开数据并导出 CSV' } })
+  check('取消/正常结束不误报', normalRes.json?.aborted === undefined && normalRes.json?.mode === 'llm', JSON.stringify(normalRes.json).slice(0, 160))
+}
 
 // ── 6. health 带版本号 ──
 const health = await call(ctx, { path: '/health', method: 'GET' })

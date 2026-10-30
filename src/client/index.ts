@@ -8,7 +8,7 @@ export const inject: string[] = ['slots']
 
 // 构建标记：出现在每个信标里，用于判断浏览器跑的是不是最新产物
 // （客户端代码改动必须用户硬刷新才生效，普通刷新命中模块缓存）
-const BUILD = 'dspo-v9'
+const BUILD = 'dspo-v11'
 
 const ROUTE = 'dsh-prompt-optimizer'
 
@@ -62,11 +62,43 @@ function beacon(stage: string, detail: Record<string, unknown> = {}) {
 // 没有超时的话，服务端一旦卡住，按钮会永久停在加载态。
 const REQUEST_TIMEOUT_MS = 60_000
 
+// ─── 可取消的当前运行 ───
+// 一次优化最长要等 45s，用户常常中途改主意（写错了、想换个问法）。
+// 这里保存当前这次运行的 AbortController：按钮在运行期切成「停止」，
+// 点击 / 按 Esc 都会 abort 掉 fetch，服务端也会在连接关闭时中止模型流。
+interface ActiveRun {
+  controller: AbortController | null
+  /** 是否是用户主动停止（用来区分「超时」与「我按了停止」） */
+  cancelled: boolean
+}
+
+let activeRun: ActiveRun | null = null
+
+/** 是否有正在进行的优化（供按钮切换停止态、供回归测试断言） */
+export function hasActiveOptimize(): boolean {
+  return activeRun !== null
+}
+
+/** 主动停止当前优化。返回是否真的停掉了一次运行。 */
+export function cancelActiveOptimize(): boolean {
+  const run = activeRun
+  if (!run) return false
+  run.cancelled = true
+  try {
+    run.controller?.abort()
+  } catch {
+    /* abort 失败不影响后续收尾 */
+  }
+  return true
+}
+
 async function optimizeRequest(
   text: string,
   mode: 'auto' | 'local' = 'auto',
+  external?: AbortController | null,
 ): Promise<{ ok: boolean; text: string; reason?: string; mode?: string; note?: string }> {
-  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+  // 优先用外部（可被「停止」按钮 abort 的）controller；拿不到时退回内部超时用的一次性 controller
+  const controller = external ?? (typeof AbortController !== 'undefined' ? new AbortController() : null)
   const timer = controller
     ? window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
     : 0
@@ -79,7 +111,12 @@ async function optimizeRequest(
       signal: controller ? controller.signal : undefined,
       body: JSON.stringify({ text, mode }),
     })
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    if (!res.ok) {
+      // 带上状态码，让调用方能给出分档提示（403 跨站 / 413 过长 / 5xx 内部错误）
+      const err = new Error(`HTTP ${res.status}`) as Error & { status?: number }
+      err.status = res.status
+      throw err
+    }
     return (await res.json()) as { ok: boolean; text: string; reason?: string; mode?: string; note?: string }
   } finally {
     if (timer) window.clearTimeout(timer)
@@ -118,13 +155,17 @@ let lastChipRestore: { total: number; restored: number } = { total: 0, restored:
  * 导致写错位置或写不进去。两个 rAF 比单个 setTimeout(0) 更稳：第一个 rAF 之后
  * selectionchange 已派发，第二个 rAF 保证 Lexical 的同步更新已提交。
  */
-function nextSelectionTick(): Promise<void> {
+export function nextSelectionTick(): Promise<void> {
   return new Promise((resolve) => {
-    if (typeof requestAnimationFrame !== 'function') {
-      setTimeout(resolve, 0)
-      return
+    let done = false
+    const fin = () => { if (!done) { done = true; resolve() } }
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(() => requestAnimationFrame(fin))
     }
-    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+    // 关键兜底：Chrome 在不可见标签页会完全停发 rAF，只靠它的话这个 Promise
+    // 永不 resolve → 写回卡死 → 按钮永久 disabled（点完切走窗口就复现）。
+    // 50ms 的定时器保证最坏情况也能收尾；正常路径 rAF 早已先到，这次调用是空操作。
+    setTimeout(fin, 50)
   })
 }
 
@@ -567,9 +608,42 @@ function buildButton(): HTMLButtonElement {
     btn.style.color = 'var(--dsw-alias-label-tertiary, #8b949e)'
   })
   btn.addEventListener('click', (e) => {
+    // 运行期按钮就是「停止」：同一个按钮两种语义，不额外多塞一个控件
+    if (hasActiveOptimize()) {
+      cancelActiveOptimize()
+      beacon('optimize-cancel', { kind: 'click' })
+      return
+    }
     void runOptimize(btn, e.shiftKey)
   })
+  // Esc 也能停：运行期用户手还留在键盘上，按键比挪鼠标去点更快
+  btn.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape' || !hasActiveOptimize()) return
+    e.preventDefault()
+    cancelActiveOptimize()
+    beacon('optimize-cancel', { kind: 'esc' })
+  })
   return btn
+}
+
+/** 运行态 ↔ 空闲态。运行中显示「停止」+ 静止图标，空闲显示「优化」+ 魔法棒。 */
+function setButtonRunning(btn: HTMLButtonElement, running: boolean): void {
+  const label = btn.querySelector('.po-btn-label') as HTMLElement | null
+  const svg = btn.querySelector('svg') as SVGElement | null
+  if (label) label.textContent = running ? '停止' : '优化'
+  btn.setAttribute('aria-label', running ? '停止优化' : '优化提示词')
+  btn.title = running
+    ? '正在优化，点击或按 Esc 停止'
+    : '优化提示词（按住 Shift 点击则只做本地规则整理）'
+  btn.dataset.poRunning = running ? '1' : '0'
+  if (svg) {
+    if (running) {
+      svg.style.transition = 'transform 0.2s'
+      svg.style.animation = 'po-spin 0.9s linear infinite'
+    } else {
+      svg.style.animation = ''
+    }
+  }
 }
 
 /** 优化主流程。composer 在点击时才查找——slot 渲染时机早于输入框挂载。 */
@@ -588,24 +662,43 @@ async function runOptimize(btn: HTMLButtonElement, forceLocal: boolean): Promise
     toast(chips.length > 0 ? '只有引用，没有提示词可优化' : '输入框为空，无需优化', '#f85149')
     return
   }
-  btn.disabled = true
-  const svg = btn.querySelector('svg') as SVGElement | null
-  if (svg) {
-    svg.style.transition = 'transform 0.2s'
-    svg.style.animation = 'po-spin 0.9s linear infinite'
+
+  // 运行期不能 disabled —— disabled 的按钮收不到 click，用户就没法中途停止。
+  // 改用 data-po-running 标记 + 文案切换来表达状态。
+  const run: ActiveRun = {
+    controller: typeof AbortController !== 'undefined' ? new AbortController() : null,
+    cancelled: false,
   }
+  activeRun = run
+  setButtonRunning(btn, true)
   try {
     const mode: 'auto' | 'local' = forceLocal ? 'local' : 'auto'
-    const data = await optimizeRequest(original, mode)
+    const data = await optimizeRequest(original, mode, run.controller)
+
+    // 并发保护：模型最慢要等 45s，这期间用户很可能已经在同一输入框继续写。
+    // 无条件覆盖会把他新打的内容整段冲掉，所以写回前必须重读并比对快照。
+    // 比对用 trim 后的纯文本：芯片不计入，光标位置变化也不算改动。
+    const latest = found.read().text
+    if (latest.trim() !== original.trim()) {
+      toast('输入内容已变化，本次优化结果已丢弃', '#d29922')
+      beacon('optimize-stale', { kind, len: original.length })
+      return
+    }
+
     if (data && data.ok && typeof data.text === 'string') {
       const wrote = await found.setText(data.text, chips)
       const via = data.mode === 'llm' ? '模型优化' : '本地规则'
       const chipNote = chips.length > 0 ? `，保留 ${lastChipRestore.restored}/${chips.length} 个引用` : ''
       if (wrote) {
-        toast(
-          data.note ? `已优化并写回（${via}）· ${data.note}` : `已优化并写回输入框（${via}）${chipNote}`,
-          '#3fb950',
-        )
+        const msg = data.note
+          ? `已优化并写回（${via}）· ${data.note}`
+          : `已优化并写回输入框（${via}）${chipNote}`
+        // 撤销：把点击时读到的原文连同芯片快照写回去。
+        // 芯片位置按新文本长度的比例重算，可能略有偏移，但内容一定救得回来。
+        toast(msg, '#3fb950', {
+          label: '撤销',
+          run: () => { void found.setText(original, chips) },
+        })
       } else {
         toast('已优化，但写回输入框失败', '#d29922')
       }
@@ -622,21 +715,60 @@ async function runOptimize(btn: HTMLButtonElement, forceLocal: boolean): Promise
       toast(data?.reason || '无需改动', '#d29922')
     }
   } catch (err) {
-    const aborted = err instanceof DOMException && err.name === 'AbortError'
-    toast(aborted ? '优化超时，请稍后重试' : '优化失败：接口不可用', '#f85149')
-    beacon('optimize-error', { kind, err: aborted ? 'timeout' : String(err) })
+    // 错误分档：403/413/404/5xx/超时各有各的原因，糊成一句「接口不可用」没法排障
+    const e = err as { name?: string; status?: number }
+    if (run.cancelled) {
+      // 用户主动停止：不是失败，用中性色提示，且不记 error 信标
+      toast('已停止优化，输入内容未改动', '#d29922')
+      beacon('optimize-stopped', { kind, len: original.length })
+    } else if (e?.name === 'AbortError') {
+      toast('优化超时（60s），请稍后重试', '#f85149')
+      beacon('optimize-error', { kind, err: 'timeout' })
+    } else if (e?.status === 403) {
+      toast('本地接口拒绝了跨站请求', '#f85149')
+      beacon('optimize-error', { kind, err: 'forbidden' })
+    } else if (e?.status === 413) {
+      toast('输入过长，请精简后再试', '#f85149')
+      beacon('optimize-error', { kind, err: 'too-large' })
+    } else if (e?.status === 404) {
+      toast('接口不存在，插件可能未正确加载', '#f85149')
+      beacon('optimize-error', { kind, err: 'not-found' })
+    } else if (typeof e?.status === 'number' && e.status >= 500) {
+      toast(`插件内部错误（HTTP ${e.status}）`, '#f85149')
+      beacon('optimize-error', { kind, err: 'server' })
+    } else {
+      toast('优化失败：接口不可用', '#f85149')
+      beacon('optimize-error', { kind, err: String(err).slice(0, 64) })
+    }
   } finally {
-    if (svg) svg.style.animation = ''
-    btn.disabled = false
+    activeRun = null
+    setButtonRunning(btn, false)
   }
 }
 
 // ─── 轻提示 ───
-function toast(msg: string, color: string) {
+// 支持一个可选操作按钮（撤销）。带操作时延长到 5s 并开启 pointer-events，
+// 否则用户还没看清就消失了；纯提示仍保持 1.8s 且不拦截鼠标。
+type ToastAction = { label: string; run: () => void }
+let pendingToastAction: (() => void) | null = null
+
+function hideToast() {
+  const t = document.getElementById('po-toast') as HTMLDivElement | null
+  if (t) {
+    t.style.opacity = '0'
+    t.style.pointerEvents = 'none'
+  }
+  pendingToastAction = null
+}
+
+function toast(msg: string, color: string, action?: ToastAction) {
   let t = document.getElementById('po-toast') as HTMLDivElement | null
   if (!t) {
     t = document.createElement('div')
     t.id = 'po-toast'
+    // 读屏软件要能播报结果，否则「点一下没反应」对无障碍用户等于静默失败
+    t.setAttribute('role', 'status')
+    t.setAttribute('aria-live', 'polite')
     Object.assign(t.style, {
       position: 'fixed',
       bottom: '24px',
@@ -644,23 +776,56 @@ function toast(msg: string, color: string) {
       transform: 'translateX(-50%)',
       padding: '8px 14px',
       borderRadius: '8px',
-      background: '#161b22',
-      color: '#e6edf3',
+      // 跟随宿主主题变量：写死 #161b22 在浅色主题下是一块突兀的深色
+      background: 'var(--dsw-alias-bg-elevated, #161b22)',
+      color: 'var(--dsw-alias-label-primary, #e6edf3)',
       fontSize: '13px',
       zIndex: '2147483647',
       boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
       transition: 'opacity 0.2s',
       pointerEvents: 'none',
+      display: 'inline-flex',
+      alignItems: 'center',
+      gap: '10px',
+      maxWidth: '78vw',
     } as CSSStyleDeclaration)
     document.body.appendChild(t)
   }
-  t.textContent = msg
+  pendingToastAction = action ? action.run : null
+  t.style.pointerEvents = action ? 'auto' : 'none'
+  t.innerHTML = ''
+
+  const label = document.createElement('span')
+  label.textContent = msg
+  t.appendChild(label)
+
+  if (action) {
+    const btn = document.createElement('button')
+    btn.type = 'button'
+    btn.textContent = action.label
+    btn.setAttribute('aria-label', action.label)
+    Object.assign(btn.style, {
+      border: 'none',
+      background: 'transparent',
+      padding: '0 2px',
+      color: 'var(--dsw-alias-state-business-primary, #58a6ff)',
+      cursor: 'pointer',
+      font: 'inherit',
+      textDecoration: 'underline',
+      whiteSpace: 'nowrap',
+    } as CSSStyleDeclaration)
+    btn.addEventListener('click', () => {
+      const run = pendingToastAction
+      hideToast()
+      if (run) run()
+    })
+    t.appendChild(btn)
+  }
+
   t.style.color = color
   t.style.opacity = '1'
   window.clearTimeout((t as any)._timer)
-  ;(t as any)._timer = window.setTimeout(() => {
-    if (t) t.style.opacity = '0'
-  }, 1800)
+  ;(t as any)._timer = window.setTimeout(hideToast, action ? 5000 : 1800)
 }
 
 // 旋转关键帧（一次性注入全局样式）

@@ -13,6 +13,10 @@ A general-purpose plugin. It binds to no project, business domain or internal pa
   - `local` — pure rule engine (adds a role line and `# 任务` / `# 要求` / `# 输出` sections). No model required.
 - **Shift+click** forces the `local` engine (no model spend, deterministic output).
 - Rewrites add a role line, the three-section task/requirements/output structure, and constraints such as “conclusion first” and “flag uncertainty instead of inventing it”.
+- **Stoppable mid-flight**: while a rewrite is running the button turns from “Optimize” into “Stop”; click it or press **Esc** to abort immediately, leaving the composer untouched. The server notices the closed connection and kills the model stream too — and it does **not** fall back to the local engine, because stopping means stopping.
+- **Undo after write-back**: the success toast carries an “Undo” action (5 s window) that restores the original text together with its reference chips.
+- **Never overwrites what you typed meanwhile**: the model can take up to 45 s; if the composer changed in the meantime the result is discarded and reported, not written.
+- **Never writes back a truncated prompt**: when the model hits the token cap the local engine takes over instead of pasting half a sentence.
 
 ## Engine selection
 
@@ -53,9 +57,9 @@ pnpm install
 pnpm run bundle          # builds lib/index.js + lib/client.js
 pnpm run gates           # structural gate (also checks package.json version == PLUGIN_VERSION)
 pnpm run test:llm        # simulates the host: llm / local / fallback paths
-pnpm run test:hardening  # idempotency, 413, 403, beacon allow-list, over-length downgrade (26 assertions)
+pnpm run test:hardening  # idempotency, 413, 403 (incl. Origin null), beacon allow-list, over-length downgrade, truncation fallback, cancel on disconnect (35 assertions)
 pnpm run test:chips      # reference-chip read filtering, restore, button placement (18 assertions)
-pnpm run test:slot       # host slot registration/render/cleanup + DOM fallback (21 assertions)
+pnpm run test:slot       # host slot registration/render/cleanup, cancel exports + DOM fallback (28 assertions)
 pnpm run test:market     # validate docs/market-index.json with the host validator (no write)
 pnpm test                # gates + the four regression suites + market index check
 ```
@@ -124,13 +128,15 @@ All routes live under `/dsh-prompt-optimizer`:
 | Constraint | Behaviour |
 | --- | --- |
 | Body size | `256 KiB`; over-limit stops reading, replies `413`, and destroys the connection only after the response is flushed. Prevents a same-machine process from exhausting host memory with a huge body |
-| Cross-origin | Every `POST` is origin-checked: `Sec-Fetch-Site: cross-site`, or `Origin` not matching `Host` → `403`; no `Origin` (non-browser client) is allowed |
-| Idempotency | Input that already is a structured prompt returns `ok:false / mode:"none"` so repeated clicks do not nest structures. The predicate covers both engines: at least 2 Markdown headings, and ≥2 section keywords among them (role / task / goal / requirement / constraint / output / context / step / acceptance / example …) |
+| Cross-origin | Every `POST` is origin-checked: `Sec-Fetch-Site: cross-site`, or `Origin` not matching `Host` → `403`; no `Origin` (non-browser client) is allowed; **`Origin: null` is rejected** (since 0.1.8 — it is what sandboxed iframes, `data:` pages and some cross-origin redirects send) |
+| Idempotency | Input that already is a structured prompt returns `ok:false / mode:"none"` so repeated clicks do not nest structures. The predicate covers both engines: at least 2 Markdown headings, and **≥3** section keywords among them (role / task / goal / requirement / constraint / output / context / step / acceptance / example …). The threshold is 3 so a user's own two-section draft (`## Background` + `## Output`) is still optimised |
+| Truncation guard | When the stream finishes with `length` / `max_tokens` / `max_output_tokens` / `content_filter`, the rewrite is treated as failed and falls back to the local engine. A half-sentence is never written back into the composer (since 0.1.8) |
 | Over-length | Input over `8000` characters skips the model and uses the local engine; the response carries a `note` explaining why |
 | Beacon fields | Only structural keys from an allow-list (`stage` / `cls` / `via` / `dotCount` …), strings truncated to 64 chars. Any page text is dropped |
 | Response headers | Always `x-content-type-options: nosniff` |
 | Reference chips | Skill (`/name`) / file / session references are `data-composer-chip` decorator nodes, not prompt text: skipped on read, restored by relative offset on write. When there is only a reference and no body text, the button says “只有引用，没有提示词可优化” and sends no request |
-| Write-back stability | The composer is a Lexical editor: after setting the DOM selection programmatically you must wait for `selectionchange` so Lexical's internal `_selection` syncs before calling `execCommand`, otherwise Lexical decides the selection is inconsistent and takes over the input (symptom: “you have to select text first”). After writing, wait a tick and read back; retry once if a re-render reverted it, then fall back to direct DOM write |
+| Write-back stability | The composer is a Lexical editor: after setting the DOM selection programmatically you must wait for `selectionchange` so Lexical's internal `_selection` syncs before calling `execCommand`, otherwise Lexical decides the selection is inconsistent and takes over the input (symptom: “you have to select text first”). After writing, wait a tick and read back; retry once if a re-render reverted it, then fall back to direct DOM write. The wait is `rAF×2` **plus a 50 ms `setTimeout` backstop** — hidden tabs stop firing rAF entirely, and relying on rAF alone leaves the button permanently disabled (since 0.1.8) |
+| Concurrent rewrite | Before writing back, the composer is re-read and compared with the snapshot taken at click time (trimmed text; chips excluded). On mismatch the result is discarded with a “content changed” notice, so work typed during the wait is never clobbered (since 0.1.8) |
 
 > `/beacon` reports DOM structure only (selectors, class names, placement mode, counts) — never user input. The server re-filters through the allow-list, so even a mistaken client report cannot persist page text.
 

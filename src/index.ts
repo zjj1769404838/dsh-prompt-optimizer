@@ -8,7 +8,7 @@ export const inject = ['webServer']
 
 const ROUTE_PREFIX = '/dsh-prompt-optimizer'
 // 与 package.json 的 version 保持一致（scripts/gates/run.mjs 会校验两者相等）
-const PLUGIN_VERSION = '0.1.7'
+const PLUGIN_VERSION = '0.1.8'
 
 // 请求体上限：/optimize 与 /beacon 都是本地小载荷，超过一律 413，
 // 避免任何同机进程用超大 body 把宿主进程的内存吃满。
@@ -54,6 +54,9 @@ function isStructuredPrompt(input: string): boolean {
   // 本地引擎产物：固定角色行 + `# 任务`，命中即判定（保留原有快速路径）。
   if (norm.includes(DEFAULT_ROLE) && /^\s*#\s*任务\s*$/m.test(norm)) return true
 
+  // 阈值取 3 而不是 2：用户自己写的结构化稿常常只有 `## 背景` + `## 输出`
+  // 两个标题（命中 2 个关键词），判据太松会把它们当成插件产物直接拒绝润色。
+  // 本插件两条路径的产物稳定命中 3 个以上（本地：# 任务 + 角色；LLM：角色/任务目标/输出要求）。
   const headings = norm.match(/^\s*#{1,3}\s*(.+)$/gm) ?? []
   if (headings.length < 2) return false
   const hit = new Set<string>()
@@ -63,7 +66,7 @@ function isStructuredPrompt(input: string): boolean {
       if (lower.includes(word)) hit.add(word)
     }
   }
-  return hit.size >= 2
+  return hit.size >= 3
 }
 
 function optimizePrompt(raw: string): { ok: boolean; text: string; reason?: string } {
@@ -203,13 +206,42 @@ async function lowestEffort(llm: any, route: Route): Promise<string | undefined>
   }
 }
 
-// 拼接流式分片：只用 text-delta（其它分片类型对文本结果无贡献）
-async function collectText(chunks: AsyncIterable<LlmChunk>): Promise<string> {
+// 结束原因里这几种代表「话没说完就断了」：token 上限、内容过滤。
+// 截断的半句写回输入框比不改还糟（用户会拿着断头提示词去问模型），
+// 遇到一律判本次改写失败，交给本地规则引擎兜底。
+const TRUNCATED_FINISH = new Set([
+  'length', 'max_tokens', 'max-tokens', 'max_output_tokens', 'content_filter',
+])
+
+// 拼接流式分片：累加 text-delta，同时记下 finish 的结束原因。
+async function collectText(
+  chunks: AsyncIterable<LlmChunk>,
+): Promise<{ text: string; truncated: boolean }> {
   let out = ''
+  let truncated = false
   for await (const c of chunks) {
-    if (c && c.type === 'text-delta' && typeof c.text === 'string') out += c.text
+    if (!c) continue
+    if (c.type === 'text-delta' && typeof c.text === 'string') {
+      out += c.text
+    } else if (c.type === 'finish' && typeof c.reason === 'string') {
+      if (TRUNCATED_FINISH.has(c.reason.toLowerCase())) truncated = true
+    }
   }
-  return out
+  return { text: out, truncated }
+}
+
+/**
+ * 「用户点了停止」的专用标记。
+ * 必须与「模型不可用」区分开：不可用要回退本地规则，用户主动停止则连本地规则也不该跑
+ * —— 他已经改主意了，再花算力算一份没人要的结果没有意义，写回更是会被他讨厌。
+ */
+const LLM_ABORTED = Symbol('llm-aborted')
+
+/** 判断这个异常是不是「信号被 abort」（超时或用户停止都会走这条路）。 */
+function isAbortError(err: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) return true
+  const name = (err as { name?: string } | null)?.name
+  return name === 'AbortError' || name === 'TimeoutError'
 }
 
 // 清掉模型爱加的外壳：前缀说明、代码块围栏、包裹引号
@@ -223,7 +255,11 @@ function sanitize(text: string): string {
   return t
 }
 
-async function optimizeWithLlm(ctx: any, raw: string): Promise<{ ok: boolean; text: string; reason?: string } | null> {
+async function optimizeWithLlm(
+  ctx: any,
+  raw: string,
+  clientSignal?: AbortSignal,
+): Promise<{ ok: boolean; text: string; reason?: string } | null | typeof LLM_ABORTED> {
   let llm: any
   try {
     llm = ctx?.get?.('llm')
@@ -236,9 +272,33 @@ async function optimizeWithLlm(ctx: any, raw: string): Promise<{ ok: boolean; te
   if (!route) return null
 
   const effort = await lowestEffort(llm, route)
-  const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
-    ? AbortSignal.timeout(LLM_TIMEOUT_MS)
-    : undefined
+
+  // 两条中止来源合并：①45s 模型超时；②浏览器断开连接（用户点了「停止」）。
+  // 用自建 controller 而不是 AbortSignal.any，避免依赖较新的 Node 版本。
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null
+  let timedOut = false
+  let clientGone = false
+  const onClientAbort = () => {
+    clientGone = true
+    try { controller?.abort() } catch { /* 忽略 */ }
+  }
+  if (clientSignal) {
+    if (clientSignal.aborted) onClientAbort()
+    else clientSignal.addEventListener('abort', onClientAbort, { once: true })
+  }
+  const timeoutTimer = controller
+    ? setTimeout(() => { timedOut = true; try { controller?.abort() } catch { /* 忽略 */ } }, LLM_TIMEOUT_MS)
+    : null
+  const cleanup = () => {
+    if (timeoutTimer) clearTimeout(timeoutTimer)
+    try { clientSignal?.removeEventListener('abort', onClientAbort) } catch { /* 忽略 */ }
+  }
+
+  // 已经断开了就别再起一次模型调用
+  if (clientGone) {
+    cleanup()
+    return LLM_ABORTED
+  }
 
   let stream: AsyncIterable<LlmChunk>
   try {
@@ -250,18 +310,29 @@ async function optimizeWithLlm(ctx: any, raw: string): Promise<{ ok: boolean; te
       maxTokens: LLM_MAX_TOKENS,
       temperature: 0.3,
       ...(effort ? { reasoningEffort: effort } : {}),
-      ...(signal ? { signal } : {}),
+      ...(controller ? { signal: controller.signal } : {}),
     })
   } catch {
+    cleanup()
     return null
   }
 
   try {
-    const text = sanitize(await collectText(stream))
+    const { text: rawText, truncated } = await collectText(stream)
+    // 用户主动停止：不回退本地规则，直接告诉上层「别写了」
+    if (clientGone) return LLM_ABORTED
+    // 被截断的产物绝不写回：宁可回退本地规则，也不要把半句话盖到用户输入上。
+    if (truncated) return null
+    const text = sanitize(rawText)
     if (!text) return null
     return { ok: true, text }
-  } catch {
+  } catch (err) {
+    // 用户停止优先于超时判定（两者都会 abort，顺序反了会把「我按了停止」说成超时）
+    if (clientGone) return LLM_ABORTED
+    if (timedOut || isAbortError(err, controller?.signal)) return null
     return null
+  } finally {
+    cleanup()
   }
 }
 
@@ -343,7 +414,11 @@ function isSameOrigin(req: any): boolean {
   if (typeof site === 'string' && site.toLowerCase() === 'cross-site') return false
 
   const origin = headers.origin
-  if (typeof origin !== 'string' || origin === '' || origin === 'null') return true
+  if (typeof origin !== 'string' || origin === '') return true
+  // `Origin: null` 不是「没有来源」：沙箱 iframe、data: 页面、部分跨源重定向都会发它。
+  // 把它与「无 Origin」归成一类等于放行任意被嵌入页面，可白嫖本地模型额度。
+  // 真正的非浏览器客户端（curl / 脚本）根本不发这个头，拒绝它不影响任何正常调用。
+  if (origin === 'null') return false
 
   let parsed: URL
   try {
@@ -456,14 +531,36 @@ function createHandler() {
         let result: { ok: boolean; text: string; reason?: string } | null = null
         let mode = 'local'
         let note: string | undefined
+        let aborted = false
+
+        // 客户端断开（用户点「停止」/ 关标签页）时把 abort 传进模型流，
+        // 否则服务端会一直跑满 45s 才收手，白烧 token。
+        const clientAbort = typeof AbortController !== 'undefined' ? new AbortController() : null
+        const onClose = () => { try { clientAbort?.abort() } catch { /* 忽略 */ } }
+        if (clientAbort) {
+          try { req.once?.('close', onClose) } catch { /* 忽略 */ }
+          try { res.once?.('close', onClose) } catch { /* 忽略 */ }
+        }
+        const clientSignal = clientAbort?.signal
 
         const tooLongForLlm = raw.length > LLM_MAX_INPUT_CHARS
         if (wantMode !== 'local' && tooLongForLlm) {
           note = `输入超过 ${LLM_MAX_INPUT_CHARS} 字符，已跳过模型改写以控制开销`
         }
         if (wantMode !== 'local' && !tooLongForLlm) {
-          result = await optimizeWithLlm(ctxRef, raw)
-          if (result) mode = 'llm'
+          const llmResult = await optimizeWithLlm(ctxRef, raw, clientSignal)
+          if (llmResult === LLM_ABORTED) {
+            // 用户主动停止：连本地规则也不跑，直接结束（连接多半已断，写不回去也无所谓）
+            aborted = true
+          } else if (llmResult) {
+            result = llmResult
+            mode = 'llm'
+          }
+        }
+        if (aborted) {
+          // 客户端已断开时 res 通常不可写，容错即可
+          try { sendJson(res, 200, { ok: false, text: raw, reason: '已停止优化', mode: 'none', aborted: true }) } catch { /* 忽略 */ }
+          return
         }
         if (!result) {
           result = optimizePrompt(raw)
