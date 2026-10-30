@@ -68,5 +68,13 @@
   },
   "author": {
     "name": "zjj"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zjj1769404838/dsh-prompt-optimizer.git"
+  },
+  "homepage": "https://github.com/zjj1769404838/dsh-prompt-optimizer#readme",
+  "bugs": {
+    "url": "https://github.com/zjj1769404838/dsh-prompt-optimizer/issues"
   }
 }

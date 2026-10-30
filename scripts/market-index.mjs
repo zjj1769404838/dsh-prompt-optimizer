@@ -7,6 +7,12 @@
 //
 // 索引格式由宿主包 `@deepseek-ai/dsh-plugin-market-index` 定义：这里只负责拼装，
 // 校验交给宿主自己的 parseMarketIndex —— 避免手写规则与宿主实现漂移。
+//
+// source 默认用 git（本机没有 npm 登录态也能发布）：
+//   commit 取 `git rev-parse HEAD`，url 取 package.json.repository.url，
+//   两者都可用环境变量覆盖：MARKET_GIT_URL / MARKET_GIT_COMMIT。
+// 想发 npm 就加 --npm（需要先 npm login 并 npm publish）。
+import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -14,8 +20,27 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const args = process.argv.slice(2)
 const checkOnly = args.includes('--check')
+const useNpm = args.includes('--npm')
 const outIdx = args.indexOf('--out')
 const outFile = outIdx === -1 ? resolve(root, 'docs/market-index.json') : resolve(args[outIdx + 1])
+
+// git 源的 url / commit：环境变量优先，其次读仓库自身状态。
+function gitSource() {
+  const url =
+    process.env.MARKET_GIT_URL ||
+    (typeof pkg.repository === 'string' ? pkg.repository : pkg.repository?.url) ||
+    ''
+  let commit = process.env.MARKET_GIT_COMMIT || ''
+  if (!commit) {
+    try {
+      commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+    } catch {
+      commit = ''
+    }
+  }
+  if (!url || !/^[0-9a-f]{40}$/.test(commit)) return null
+  return { type: 'git', url, commit }
+}
 
 const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'))
 
@@ -44,6 +69,16 @@ function buildIndex() {
     ? `data:image/svg+xml;base64,${readFileSync(iconPath).toString('base64')}`
     : undefined
 
+  const git = useNpm ? null : gitSource()
+  if (!useNpm && !git) {
+    console.error(
+      '[market-index] 无法确定 git 源（需要 package.json.repository.url 与一个可读的 commit）；' +
+        '设置 MARKET_GIT_URL / MARKET_GIT_COMMIT，或改用 --npm',
+    )
+    process.exit(1)
+  }
+  const source = git ?? { type: 'npm' }
+
   return {
     format: 1,
     title: { en: 'zjj plugins', zh: 'zjj 插件' },
@@ -66,7 +101,14 @@ function buildIndex() {
         ...(icon ? { icon } : {}),
         ...(pkg.author?.name ? { author: pkg.author.name } : {}),
         ...(pkg.homepage ? { homepage: pkg.homepage } : {}),
-        ...(pkg.repository ? { repository: { url: pkg.repository } } : {}),
+        ...(pkg.repository
+          ? {
+              repository: {
+                url:
+                  typeof pkg.repository === 'string' ? pkg.repository : pkg.repository.url,
+              },
+            }
+          : {}),
         metadata: {
           category: 'productivity',
           keywords: ['prompt', 'optimize', 'composer'],
@@ -76,7 +118,7 @@ function buildIndex() {
           {
             version: pkg.version,
             publishTimestamp: Math.floor(Date.now() / 1000),
-            source: { type: 'npm' },
+            source,
             ...(pkg.engines?.dsh ? { engines: { dsh: pkg.engines.dsh } } : {}),
           },
         ],
