@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Prompt Optimizer">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7C5CFF"/>
+      <stop offset="100%" stop-color="#33C7FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="url(#g)"/>
+  <!-- 魔法棒：一根斜棒 + 顶端星芒 -->
+  <g stroke="#fff" stroke-linecap="round" fill="none">
+    <path d="M20 46 L40 26" stroke-width="5"/>
+  </g>
+  <g fill="#fff">
+    <path d="M44 12 l2.6 6.4 L53 21 l-6.4 2.6 L44 30 l-2.6-6.4 L35 21 l6.4-2.6 z"/>
+    <circle cx="49" cy="34" r="2.4"/>
+    <circle cx="31" cy="15" r="2"/>
+  </g>
+</svg>

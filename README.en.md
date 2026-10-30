@@ -1,0 +1,125 @@
+# @zjj/dsh-prompt-optimizer
+
+<p><strong>Adds an “Optimize” button to the DSH Web composer: one click rewrites a rough request into a structured prompt, using the model DSH is already connected to (<code>ctx.llm</code>), with a local rule-based engine as fallback.</strong></p>
+
+A general-purpose plugin. It binds to no project, business domain or internal path — on any DSH instance it only depends on the host's public `webServer` service and the browser DOM.
+
+## What it does
+
+- Registers a button (wand icon + `优化`) into the host slot `conversation.input.left`, so it sits next to the Git branch chip and is ordered by the host (order `20` < Git panel's `30` → always on its left). Falls back to DOM injection when the slot service is unavailable.
+- On click it reads the composer text, calls the server-side rewrite, and writes the result back into the composer.
+- **Two engines**
+  - `llm` — uses the model DSH is already connected to (`ctx.llm`). No extra key, no extra account.
+  - `local` — pure rule engine (adds a role line and `# 任务` / `# 要求` / `# 输出` sections). No model required.
+- **Shift+click** forces the `local` engine (no model spend, deterministic output).
+- Rewrites add a role line, the three-section task/requirements/output structure, and constraints such as “conclusion first” and “flag uncertainty instead of inventing it”.
+
+## Engine selection
+
+| Situation | Engine |
+| --- | --- |
+| Host exposes `ctx.llm` and a provider/model can be resolved | `llm` |
+| No `ctx.llm`, unresolvable route, stream failure, or empty result | `local` |
+| Request carries `mode: "local"` | `local` |
+
+The response carries a `mode` field (`llm` / `local` / `none`) and the client toast shows which engine ran.
+
+## Install
+
+```sh
+# from npm (recommended)
+dsh plugin --profile desktop add @zjj/dsh-prompt-optimizer
+
+# or from a local source checkout (profile links to it)
+dsh plugin --profile desktop add "D:/my-projects/plugins/dsh-prompt-optimizer"
+
+# or from git
+dsh plugin --profile desktop add "github:<owner>/dsh-prompt-optimizer#main"
+
+dsh web
+```
+
+> Restart DSH after installing to load the node half; hard-refresh the browser (Ctrl+Shift+R) for client-half changes.
+
+### Compatibility
+
+`engines.dsh` is `>=0.2.0-rc.1 <0.3.0-0`. DSH compares the runtime version against this declaration before loading (when `engines.dsh` exists it is the only check — `peerDependencies` is ignored). A mismatch marks the plugin incompatible in the market and blocks installation.
+
+## Develop
+
+```sh
+cd D:/my-projects/plugins/dsh-prompt-optimizer
+pnpm install
+pnpm run bundle          # builds lib/index.js + lib/client.js
+pnpm run gates           # structural gate (also checks package.json version == PLUGIN_VERSION)
+pnpm run test:llm        # simulates the host: llm / local / fallback paths
+pnpm run test:hardening  # idempotency, 413, 403, beacon allow-list, over-length downgrade (26 assertions)
+pnpm run test:chips      # reference-chip read filtering, restore, button placement (18 assertions)
+pnpm run test:slot       # host slot registration/render/cleanup + DOM fallback (21 assertions)
+pnpm run test:market     # validate docs/market-index.json with the host validator (no write)
+pnpm test                # gates + the four regression suites + market index check
+```
+
+- Node logic lives in `src/index.ts`: `optimizeWithLlm()` (reads `ctx.get('llm')` and `ctx.get('agentDefaultModel')`, assembles `text-delta` chunks by hand) and `optimizePrompt()` (local rule fallback).
+- Client entry lives in `src/client/index.ts`: prefers `ctx.slots.inject('conversation.input.left', …)` + `ctx.slots.register({ name, id, order }, Component)`; the host sorts by `order`, so the position is stable across React re-renders. DOM injection + `MutationObserver` is only a fallback.
+- Reference chips are handled by `readEditorText()` / `restoreChips()`: the DSH composer is a Lexical editor and skill (`/name`) / file / session references render as `<span data-composer-chip="<source>" contenteditable="false">`. Reads skip chips and writes re-insert them by relative offset, so labels are never rewritten as prompt text and references are not wiped on write-back.
+
+## Publishing to the plugin market
+
+The DSH plugin market is a **format 1 JSON index**, not a hosting platform: users point their profile at the index URL. Three steps:
+
+```sh
+npm test                      # green first
+npm pack --dry-run            # 13 files, no host-proprietary code
+npm publish                   # publishConfig.access=public is already set (required for scoped packages)
+npm run market-index          # → docs/market-index.json (icon inlined as a base64 data URL)
+```
+
+Host `docs/market-index.json` anywhere publicly reachable (GitHub Pages / jsDelivr / your own domain) and add that URL to `plugin-market.indexes` in the user's `cordis.patch.yml`.
+
+- `scripts/market-index.mjs` builds the index from `package.json` + `icon.svg` and validates it with the host's own `parseMarketIndex` before writing. Override the validator path with `DSH_APP_DIR` or `DSH_MARKET_INDEX_PKG`.
+- `publishTimestamp` must be **Unix seconds** (milliseconds are rejected). It currently uses generation time; for a real release use `npm view @zjj/dsh-prompt-optimizer time.<version>`.
+- Compatibility is decided solely by `engines.dsh` (see above).
+
+## Architecture
+
+See [docs/plan.md](docs/plan.md).
+
+## HTTP API
+
+All routes live under `/dsh-prompt-optimizer`:
+
+| Method | Path | Description |
+| --- | --- | --- |
+| GET | `/dsh-prompt-optimizer/health` | Smoke check: `{status, plugin, version, uptime, engine}` |
+| POST | `/dsh-prompt-optimizer/optimize` | Rewrite: `{text, mode?}` → `{ok, text, reason, mode, note?}` |
+| GET | `/dsh-prompt-optimizer/beacon` | Diagnostics: returns client-reported DOM probe records |
+| POST | `/dsh-prompt-optimizer/beacon` | Diagnostics: client report (last 50 kept in memory) |
+
+### Interface constraints
+
+| Constraint | Behaviour |
+| --- | --- |
+| Body size | `256 KiB`; over-limit stops reading, replies `413`, and destroys the connection only after the response is flushed. Prevents a same-machine process from exhausting host memory with a huge body |
+| Cross-origin | Every `POST` is origin-checked: `Sec-Fetch-Site: cross-site`, or `Origin` not matching `Host` → `403`; no `Origin` (non-browser client) is allowed |
+| Idempotency | Input that already is a structured prompt returns `ok:false / mode:"none"` so repeated clicks do not nest structures. The predicate covers both engines: at least 2 Markdown headings, and ≥2 section keywords among them (role / task / goal / requirement / constraint / output / context / step / acceptance / example …) |
+| Over-length | Input over `8000` characters skips the model and uses the local engine; the response carries a `note` explaining why |
+| Beacon fields | Only structural keys from an allow-list (`stage` / `cls` / `via` / `dotCount` …), strings truncated to 64 chars. Any page text is dropped |
+| Response headers | Always `x-content-type-options: nosniff` |
+| Reference chips | Skill (`/name`) / file / session references are `data-composer-chip` decorator nodes, not prompt text: skipped on read, restored by relative offset on write. When there is only a reference and no body text, the button says “只有引用，没有提示词可优化” and sends no request |
+| Write-back stability | The composer is a Lexical editor: after setting the DOM selection programmatically you must wait for `selectionchange` so Lexical's internal `_selection` syncs before calling `execCommand`, otherwise Lexical decides the selection is inconsistent and takes over the input (symptom: “you have to select text first”). After writing, wait a tick and read back; retry once if a re-render reverted it, then fall back to direct DOM write |
+
+> `/beacon` reports DOM structure only (selectors, class names, placement mode, counts) — never user input. The server re-filters through the allow-list, so even a mistaken client report cannot persist page text.
+
+## DSH contract notes
+
+- `llm` is an **optional** injected service. Do not put it in `export const inject`, or the plugin fails to start on a host without a model. Read it defensively at runtime via `ctx.get('llm')`.
+- Third-party plugins must **not** `import ... from '@deepseek-ai/dsh-llm'`: that package is absent from the profile's `node_modules` and a static import fails to resolve. Build request messages and assemble chunks by hand.
+- Request messages accept the shorthand form `{ role: 'user', content: [{ type: 'text', text }] }` (no `id` / `source` needed).
+- Only accumulate chunks with `type === 'text-delta'`.
+- Pick the **lowest** reasoning effort explicitly (the DeepSeek adapter defaults to `high` and burns short answers on thinking).
+- Button placement **must** go through the host slot `conversation.input.left`. DSH's front-end class names are build-time hashes and React rebuilds that row on every render, so any “find an anchor, then insertBefore” approach drifts; keep it as fallback only.
+
+## License
+
+MIT

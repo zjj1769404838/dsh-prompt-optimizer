@@ -1,0 +1,72 @@
+{
+  "name": "@zjj/dsh-prompt-optimizer",
+  "version": "0.1.7",
+  "description": "DSH 输入框「优化」按钮：一键把口语化输入改写成结构化提示词。优先复用宿主已连接模型（ctx.llm），不可用时回退本地规则引擎，零配置可用。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    },
+    "manifestVersion": 1
+  },
+  "scripts": {
+    "bundle": "node scripts/build.mjs",
+    "gates": "node scripts/gates/run.mjs",
+    "test:llm": "node scripts/test-llm-path.mjs",
+    "test:hardening": "node scripts/test-hardening.mjs",
+    "test": "node scripts/gates/run.mjs && node scripts/test-llm-path.mjs && node scripts/test-hardening.mjs && node scripts/test-chips.mjs && node scripts/test-slot.mjs && node scripts/market-index.mjs --check",
+    "test:chips": "node scripts/test-chips.mjs",
+    "test:slot": "node scripts/test-slot.mjs",
+    "market-index": "node scripts/market-index.mjs",
+    "test:market": "node scripts/market-index.mjs --check"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "icon.svg",
+    "docs",
+    "src"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "dsh",
+    "prompt",
+    "prompt-optimizer",
+    "prompt-engineering",
+    "llm",
+    "ui",
+    "composer"
+  ],
+  "engines": {
+    "node": ">=20",
+    "dsh": ">=0.2.0-rc.1 <0.3.0-0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "author": {
+    "name": "zjj"
+  }
+}

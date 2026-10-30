@@ -1,0 +1,7 @@
+# dsh-prompt-optimizer bundle patch
+#
+# scoped 包名在 YAML 里必须加引号，否则 `@` 开头会被解析成非法标量。
+# id 用短名即可（宿主只要求同 profile 内唯一）。
+- insert:
+    - id: dsh-prompt-optimizer
+      name: '@zjj/dsh-prompt-optimizer'

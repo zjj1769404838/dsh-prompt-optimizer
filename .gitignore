@@ -1,0 +1,10 @@
+node_modules/
+*.tgz
+*.log
+.DS_Store
+
+# 排障用的宿主产物提取目录（内含 DSH 宿主专有代码，绝不进仓库/发布包）
+.tmp-probe/
+.scratch/
+*.bak
+package.json.bak-*

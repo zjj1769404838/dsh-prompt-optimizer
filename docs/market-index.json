@@ -1,0 +1,67 @@
+{
+  "format": 1,
+  "title": {
+    "en": "zjj plugins",
+    "zh": "zjj 插件"
+  },
+  "description": {
+    "en": "Plugins by zjj for DeepSeek Harness.",
+    "zh": "zjj 为 DeepSeek Harness 维护的插件。"
+  },
+  "metadata": {
+    "categories": {
+      "productivity": {
+        "title": {
+          "en": "Productivity",
+          "zh": "效率"
+        }
+      }
+    },
+    "labels": {
+      "prompt": {
+        "title": {
+          "en": "Prompt",
+          "zh": "提示词"
+        }
+      }
+    }
+  },
+  "plugins": [
+    {
+      "name": "@zjj/dsh-prompt-optimizer",
+      "title": {
+        "en": "Prompt Optimizer",
+        "zh": "提示词优化"
+      },
+      "description": {
+        "en": "One-click rewrite of a rough composer request into a structured prompt, using the model DSH is already connected to, with a local rule engine as fallback.",
+        "zh": "一键把输入框里的口语化需求改写成结构化提示词，优先复用 DSH 已连接模型，不可用时回退本地规则引擎。"
+      },
+      "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByb2xlPSJpbWciIGFyaWEtbGFiZWw9IlByb21wdCBPcHRpbWl6ZXIiPgogIDxkZWZzPgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJnIiB4MT0iMCIgeTE9IjAiIHgyPSIxIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiM3QzVDRkYiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjMzNDN0ZGIi8+CiAgICA8L2xpbmVhckdyYWRpZW50PgogIDwvZGVmcz4KICA8cmVjdCB3aWR0aD0iNjQiIGhlaWdodD0iNjQiIHJ4PSIxNCIgZmlsbD0idXJsKCNnKSIvPgogIDwhLS0g6a2U5rOV5qOS77ya5LiA5qC55pac5qOSICsg6aG256uv5pif6IqSIC0tPgogIDxnIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIiBmaWxsPSJub25lIj4KICAgIDxwYXRoIGQ9Ik0yMCA0NiBMNDAgMjYiIHN0cm9rZS13aWR0aD0iNSIvPgogIDwvZz4KICA8ZyBmaWxsPSIjZmZmIj4KICAgIDxwYXRoIGQ9Ik00NCAxMiBsMi42IDYuNCBMNTMgMjEgbC02LjQgMi42IEw0NCAzMCBsLTIuNi02LjQgTDM1IDIxIGw2LjQtMi42IHoiLz4KICAgIDxjaXJjbGUgY3g9IjQ5IiBjeT0iMzQiIHI9IjIuNCIvPgogICAgPGNpcmNsZSBjeD0iMzEiIGN5PSIxNSIgcj0iMiIvPgogIDwvZz4KPC9zdmc+Cg==",
+      "author": "zjj",
+      "metadata": {
+        "category": "productivity",
+        "keywords": [
+          "prompt",
+          "optimize",
+          "composer"
+        ],
+        "labels": [
+          "prompt"
+        ]
+      },
+      "versions": [
+        {
+          "version": "0.1.7",
+          "publishTimestamp": 1793367321,
+          "source": {
+            "type": "npm"
+          },
+          "engines": {
+            "dsh": ">=0.2.0-rc.1 <0.3.0-0"
+          }
+        }
+      ]
+    }
+  ]
+}
