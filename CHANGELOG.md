@@ -8,8 +8,8 @@
 
 - **包名改为 `@zjj/dsh-prompt-optimizer`**（scoped）。`cordis.patch.yml` 里的 `name` 随之加引号（YAML 中 `@` 开头的标量必须引号包裹）；`export const name`、`/health` 返回的 `plugin` 字段、日志前缀同步更新。
 - `engines` 由 `node: ">=18"` 收紧为 `node: ">=20"`，并新增 `engines.dsh: ">=0.2.0-rc.1 <0.3.0-0"`。DSH 加载前只比对 `engines.dsh`（声明了它就不再看 `peerDependencies`），声明缺失或非法 range 会被判为不兼容。
-- 新增 `publishConfig.access = "public"`（scoped 包发布 npm 必须显式声明，否则默认按私有处理而失败）、`author`。
-- `files` 白名单补 `README.en.md`、`CHANGELOG.md`、`icon.svg`。
+- 新增 `publishConfig.access = "public"`（scoped 包发布 npm 必须显式声明，否则默认按私有处理而失败）、`author`、`repository`、`homepage`、`bugs`。
+- `files` 白名单补 `README.en.md`、`CHANGELOG.md`、`icon.svg`；**不再包含 `docs`**（索引由仓库托管，包内留副本只会漂移）。发布包 11 文件 / 45.0 kB packed。
 
 ### 新增
 
@@ -18,11 +18,14 @@
 - `CHANGELOG.md`（本文件）。
 - `scripts/market-index.mjs`：从 `package.json` + `icon.svg` 生成 **format 1** 市场索引到 `docs/market-index.json`，写盘前调用宿主自己的 `parseMarketIndex` 校验（`--check` 只验不写，已接入 `npm test`）。校验器路径可用 `DSH_APP_DIR` / `DSH_MARKET_INDEX_PKG` 覆盖，找不到时降级为 warn 不中断。
 - README 中英双语新增「发布到插件市场」章节：索引是 format 1 JSON、用户侧配置 `plugin-market.indexes`、`publishTimestamp` 必须 Unix 秒、兼容性只看 `engines.dsh`。
+- **市场索引默认走 git 源**：`source: {type:'git', url, commit}`，`commit` 取 `git rev-parse HEAD`，可用 `MARKET_GIT_URL` / `MARKET_GIT_COMMIT` 覆盖；`--npm` 切回 npm 源。本机无 npm 登录态（`npm whoami` → `ENEEDAUTH`）时也能发布。
+- 索引托管实测两条路径：GitHub Pages（`https://zjj1769404838.github.io/dsh-prompt-optimizer/market-index.json`，推送后约 10 秒生效）与 jsDelivr（`@main` / `@v0.1.7`，改 tag 后需 `purge.jsdelivr.net` 清缓存）。**raw.githubusercontent.com 有约 5 分钟 CDN 延迟**，不要用它判断发布是否成功。
 
 ### 修复
 
 - 移除仓库内 `.tmp-probe/` 目录。该目录是排障期从 DSH 桌面端 `app.asar` 提取的宿主产物（`conversation.js` 773 KB 等），属宿主专有代码，既不能进版本库也不能进发布包；已移至工程外的临时目录，并把 `.tmp-probe/`、`.scratch/`、`package.json.bak-*` 写进 `.gitignore`。
 - README 的安装段与「已知的 DSH 契约要点」更新：按钮定位结论从「纯 DOM + MutationObserver」改为「必须走宿主槽位 `conversation.input.left`，DOM 只作兜底」，与实际实现一致。
+- `package-lock.json` 重生成：改 `package.json` 的 `name` 后 `npm install --package-lock-only` **不会**同步 lock 里的 `name`/`version`，必须删掉 lock 重装。
 
 ## [0.1.6] — 2026-10-29
 
