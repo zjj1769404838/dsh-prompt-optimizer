@@ -41,7 +41,6 @@
     "CHANGELOG.md",
     "LICENSE",
     "icon.svg",
-    "docs",
     "src"
   ],
   "license": "MIT",
