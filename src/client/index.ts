@@ -8,7 +8,7 @@ export const inject: string[] = ['slots']
 
 // 构建标记：出现在每个信标里，用于判断浏览器跑的是不是最新产物
 // （客户端代码改动必须用户硬刷新才生效，普通刷新命中模块缓存）
-const BUILD = 'dspo-v11'
+const BUILD = 'dspo-v12'
 
 const ROUTE = 'dsh-prompt-optimizer'
 
@@ -92,6 +92,17 @@ export function cancelActiveOptimize(): boolean {
   return true
 }
 
+// ─── 当前会话 id ───
+// 宿主渲染槽位时把 binding.key（= sessionId）作为第一参传给 spec 的 inject，
+// 注入结果除 hooks 键外原样成为组件 props。这里把它存到模块级，
+// 供 POST /optimize 时带上——node 半边靠它读会话历史做消歧。
+let currentSessionId = ''
+
+/** 供回归测试读取（也方便排障时确认槽位是否拿到了会话身份） */
+export function getSessionId(): string {
+  return currentSessionId
+}
+
 async function optimizeRequest(
   text: string,
   mode: 'auto' | 'local' = 'auto',
@@ -109,7 +120,7 @@ async function optimizeRequest(
       headers: { 'Content-Type': 'application/json', accept: 'application/json' },
       cache: 'no-store',
       signal: controller ? controller.signal : undefined,
-      body: JSON.stringify({ text, mode }),
+      body: JSON.stringify({ text, mode, ...(currentSessionId ? { sessionId: currentSessionId } : {}) }),
     })
     if (!res.ok) {
       // 带上状态码，让调用方能给出分档提示（403 跨站 / 413 过长 / 5xx 内部错误）
@@ -882,21 +893,36 @@ function registerSlot(ctx: any): boolean {
     slots.inject(SLOT_NAME, () => {
       try {
         return slots.register(
-          { name: SLOT_NAME, id: SLOT_ID, order: SLOT_ORDER },
-          function OptimizeButton() {
+          {
+            name: SLOT_NAME,
+            id: SLOT_ID,
+            order: SLOT_ORDER,
+            // 宿主调用 inject(sessionId) 并把返回值（除 hooks 键外）原样并入组件 props。
+            // 这样组件就能拿到当前会话身份，POST 时带上去读历史。
+            inject: (sessionId: string | undefined) => ({ sessionId: sessionId ?? '' }),
+          },
+          function OptimizeButton(props: any) {
             const ref = React.useRef<any>(null)
             React.useEffect(() => {
+              const sid = typeof props?.sessionId === 'string' ? props.sessionId : ''
+              if (sid) currentSessionId = sid
               const host = ref.current as HTMLElement | null
               if (!host) return undefined
               ensureSpinStyle()
               // 同一会话里 React 可能重复挂载，先清掉旧节点避免出现两个按钮
               host.innerHTML = ''
               host.appendChild(buildButton())
-              beacon('injected', { kind: 'slot', via: 'slot-left', anchorCls: SLOT_NAME })
+              beacon('injected', {
+                kind: 'slot',
+                via: 'slot-left',
+                anchorCls: SLOT_NAME,
+                // 只上报「有没有拿到会话身份」，不上报 id 本身
+                note: sid ? 'session-bound' : 'session-none',
+              })
               return () => {
                 host.innerHTML = ''
               }
-            }, [])
+            }, [props?.sessionId])
             return React.createElement('span', {
               ref,
               style: { display: 'inline-flex', alignItems: 'center' },

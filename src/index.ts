@@ -8,7 +8,7 @@ export const inject = ['webServer']
 
 const ROUTE_PREFIX = '/dsh-prompt-optimizer'
 // 与 package.json 的 version 保持一致（scripts/gates/run.mjs 会校验两者相等）
-const PLUGIN_VERSION = '0.1.8'
+const PLUGIN_VERSION = '0.1.9'
 
 // 请求体上限：/optimize 与 /beacon 都是本地小载荷，超过一律 413，
 // 避免任何同机进程用超大 body 把宿主进程的内存吃满。
@@ -32,6 +32,98 @@ const DEFAULT_REQ = [
 ]
 const DEFAULT_OUT = '请直接给出结果；如需解释，附在结果之后。'
 
+// ─── 场景分流 ───
+// 「古板」的根源是一套通用模板套所有需求：写代码和写文案要的约束根本不是一回事，
+// 用同一份「结论先行、分点说明」去润色一段代码需求，产出必然空洞。
+// 这里按输入特征判定场景，每个场景带自己的角色、约束与输出要求；
+// 判不出来才退回通用模板。
+export type Scene = 'code' | 'writing' | 'analysis' | 'translate' | 'image' | 'general'
+
+const SCENE_MATCHERS: Array<{ scene: Scene; re: RegExp }> = [
+  // 代码优先：技术需求里常夹「写」「说明」这类词，先判技术再判写作，避免被写作规则吃掉。
+  // 「爬虫/抓取/数据库/服务端」这类词必须在内：实测「帮我写个爬虫」曾被判成写作场景，
+  // 因为「写个」命中了写作正则而技术词表里没有「爬虫」。
+  {
+    scene: 'code',
+    re: /(代码|函数|报错|异常|编译|脚本|接口|依赖|单测|测试用例|重构|正则|sql|html|css|react|vue|python|java|typescript|node|json|yaml|git|部署|性能|bug|debug|api|爬虫|抓取|爬取|数据库|服务端|客户端|算法|中间件|微服务|docker|nginx|redis|mysql|shell|bash|命令行)/i,
+  },
+  { scene: 'translate', re: /(翻译|译成|英译|中译|笔译|translate|locali[sz]e|i18n)/i },
+  {
+    scene: 'image',
+    re: /(画(一|个|张|幅|成|出)|绘制|插画|海报|配图|出图|生图|文生图|logo|icon|svg|构图|配色|midjourney|stable diffusion|seedream|即梦|dall-?e)/i,
+  },
+  {
+    scene: 'writing',
+    re: /(写一|写个|写份|文案|文章|故事|小说|脚本|标题|邮件|回复|润色|改写|语气|风格|小红书|公众号|周报|总结|readme|readme)/i,
+  },
+  {
+    scene: 'analysis',
+    re: /(分析|对比|评估|诊断|原因|为什么|数据|统计|趋势|方案|策略|利弊|选型|风险|优化建议)/i,
+  },
+]
+
+function detectScene(raw: string): Scene {
+  for (const m of SCENE_MATCHERS) {
+    if (m.re.test(raw)) return m.scene
+  }
+  return 'general'
+}
+
+const SCENE_ROLE: Record<Scene, string> = {
+  general: DEFAULT_ROLE,
+  code: '你是一位资深软件工程师，擅长把模糊的技术需求转化为可直接落地的实现要求。',
+  writing: '你是一位资深内容编辑，擅长把粗略的写作意图转化为风格明确、可直接落笔的写作要求。',
+  analysis: '你是一位资深分析师，擅长把笼统的分析诉求转化为口径清晰、可验证的分析要求。',
+  translate: '你是一位资深译者与本地化专家，擅长把翻译需求转化为语域明确、术语一致的翻译要求。',
+  image: '你是一位资深视觉提示词工程师，擅长把画面想法转化为构图、光线、风格都明确的生成提示词。',
+}
+
+const SCENE_REQ: Record<Scene, string[]> = {
+  general: DEFAULT_REQ,
+  code: [
+    '- 明确语言/框架/运行环境；缺省时按最通用的方案，并在文中标注这个假设',
+    '- 给出可运行的完整实现或明确的改动点，不用伪代码占位',
+    '- 交代边界与失败处理（空值、异常、并发、超时）',
+    '- 需要验证时给出可执行的验证步骤或断言',
+  ],
+  writing: [
+    '- 明确读者、发布渠道与写作目的',
+    '- 明确篇幅、语气与风格（正式/口语、克制/煽动）',
+    '- 只使用已给出的事实与数据，不新增未提供的细节',
+    '- 列出必须出现的要点与必须避免的表达',
+  ],
+  analysis: [
+    '- 明确分析对象、口径与时间范围',
+    '- 先给结论，再给支撑依据与推理链',
+    '- 事实、推断、假设三者分别标注',
+    '- 数据不足时说明缺口，不虚构数字',
+  ],
+  translate: [
+    '- 明确源语言、目标语言与目标读者',
+    '- 专有名词与术语给统一译法，必要时保留原文以便核对',
+    '- 说明语域（技术文档/营销文案/法律文本）与本地化要求',
+    '- 只输出译文，取舍说明单独附在译文之后',
+  ],
+  image: [
+    '- 主体、动作、场景、镜头景别与视角',
+    '- 光线、色调、风格与质感',
+    '- 画幅比例，以及画面内文字/必须不出现的元素',
+    '- 用可被模型理解的具体名词，避免抽象形容词堆砌',
+  ],
+}
+
+const SCENE_OUT: Record<Scene, string> = {
+  general: DEFAULT_OUT,
+  code: '直接给出代码与必要的运行说明；不要用省略号跳过关键实现。',
+  writing: '直接给出成稿；若给多个版本，按版本分别标注差异。',
+  analysis: '结论先行，随后给依据；每条结论都要能被数据或原文支撑。',
+  translate: '只输出译文；术语与取舍说明放在译文之后。',
+  image: '输出一段可直接粘贴进生成模型的提示词，不要附加解释。',
+}
+
+/** 本地引擎可能写出的全部角色行，用于幂等判据识别自己人。 */
+const ROLE_LINES = Object.values(SCENE_ROLE)
+
 // 结构化提示词的段落关键词：本地引擎与 LLM 路径的产物都覆盖。
 const SECTION_WORDS = [
   '角色', '任务', '目标', '要求', '约束', '输出', '背景', '步骤', '验收', '示例',
@@ -52,7 +144,9 @@ const SECTION_WORDS = [
 function isStructuredPrompt(input: string): boolean {
   const norm = input.replace(/\r\n/g, '\n')
   // 本地引擎产物：固定角色行 + `# 任务`，命中即判定（保留原有快速路径）。
-  if (norm.includes(DEFAULT_ROLE) && /^\s*#\s*任务\s*$/m.test(norm)) return true
+  // 必须是「任一场景角色行」——按场景分流后角色行有六种，只认 DEFAULT_ROLE
+  // 会漏掉代码/写作/分析/翻译/图像五类产物，导致连点把产物再包一层。
+  if (/^\s*#\s*任务\s*$/m.test(norm) && ROLE_LINES.some((line) => norm.includes(line))) return true
 
   // 阈值取 3 而不是 2：用户自己写的结构化稿常常只有 `## 背景` + `## 输出`
   // 两个标题（命中 2 个关键词），判据太松会把它们当成插件产物直接拒绝润色。
@@ -86,14 +180,17 @@ function optimizePrompt(raw: string): { ok: boolean; text: string; reason?: stri
 
   const lines = src.split(/\r?\n/)
   const firstLine = lines[0].trim()
+  // 按输入特征判场景：代码 / 写作 / 分析 / 翻译 / 图像 / 通用。
+  // 场景决定角色行、约束清单与输出要求，这是「不再古板」的核心改动。
+  const scene = detectScene(src)
 
   const out: string[] = []
   let changed = false
 
-  // 1) 角色设定：若首行未声明角色，补一个通用"你是一位资深助手"
+  // 1) 角色设定：若首行未声明角色，补该场景的角色行（不是一套通用话术）
   const hasRole = /你(是|是一位|作为一个)|你是|act as|you are|作为/i.test(firstLine)
   if (!hasRole) {
-    out.push(DEFAULT_ROLE)
+    out.push(SCENE_ROLE[scene])
     changed = true
   }
 
@@ -102,21 +199,21 @@ function optimizePrompt(raw: string): { ok: boolean; text: string; reason?: stri
   out.push(src)
   changed = true
 
-  // 3) 结构化约束（除非原文已存在明显的编号/分点）
+  // 3) 场景约束（除非原文已存在明显的编号/分点）
   const hasStructure = /(^\s*[\d一二三四1-9][.、)）]|\n\s*[-*·])/m.test(src)
   if (!hasStructure) {
     out.push(``)
     out.push(`# 要求`)
-    for (const item of DEFAULT_REQ) out.push(item)
+    for (const item of SCENE_REQ[scene]) out.push(item)
     changed = true
   }
 
-  // 4) 输出格式提示
+  // 4) 输出格式提示（场景专属）
   const hasFormat = /(以.*格式|输出为|markdown|json|表格|bullet|列表)/i.test(src)
   if (!hasFormat) {
     out.push(``)
     out.push(`# 输出`)
-    out.push(DEFAULT_OUT)
+    out.push(SCENE_OUT[scene])
     changed = true
   }
 
@@ -125,18 +222,65 @@ function optimizePrompt(raw: string): { ok: boolean; text: string; reason?: stri
 }
 
 // ─── LLM 路径：系统提示词 ───
-const SYSTEM_PROMPT = [
-  '你是一名提示词工程专家。用户会给你一段想交给 AI 的原始需求，'
-  + '你的唯一任务是把它改写成一条更清晰、更可执行、更少歧义的提示词。',
-  '',
-  '改写规则：',
+// 单一 system prompt 是「古板」的另一半根源：代码、写作、分析、翻译共用一套规则，
+// 模型只能给出通用腔。这里按场景给不同的改写侧重，并在有会话上下文时明确要求
+// 「沿用上文已确定的前提」，避免每条提示词都像凭空冒出来的。
+const BASE_RULES = [
   '1. 保留用户的原始意图、约束条件、专有名词、数据与代码，不要臆造新需求。',
   '2. 补齐缺失的要素：角色、任务目标、上下文、约束、期望输出形式。',
   '3. 消解歧义：把"好一点/丰富一点"这类模糊表述改写成可判定的具体要求。',
   '4. 结构化：用简短小标题与要点组织，长任务拆成分步。',
   '5. 只输出改写后的提示词正文，不要解释、不要前后加引号、不要用代码块包裹。',
   '6. 若原提示词已经足够清晰，输出优化后的同义版本（可更紧凑），不要拒绝回答。',
-].join('\n')
+]
+
+const SCENE_FOCUS: Record<Scene, string[]> = {
+  general: [],
+  code: [
+    '- 这是技术需求：补齐语言/框架/运行环境、输入输出契约、边界与失败处理；',
+    '  要求可运行而非伪代码，并给出可执行的验证方式。',
+  ],
+  writing: [
+    '- 这是写作需求：补齐读者、渠道、目的、篇幅、语气与风格；',
+    '  只允许使用用户已给出的事实，明确禁止编造未提供的细节。',
+  ],
+  analysis: [
+    '- 这是分析需求：补齐分析对象、口径、时间范围；要求结论先行并区分事实/推断/假设。',
+  ],
+  translate: [
+    '- 这是翻译需求：补齐源语言、目标语言、语域与本地化要求；术语给统一译法并保留原文以便核对。',
+  ],
+  image: [
+    '- 这是图像生成需求：补齐主体、动作、场景、景别、光线、色调、风格、画幅比例；',
+    '  用具体名词而非抽象形容词，并明确画面内文字要求。',
+  ],
+}
+
+function buildSystemPrompt(scene: Scene, hasContext: boolean): string {
+  const focus = SCENE_FOCUS[scene] ?? []
+  const lines = [
+    '你是一名提示词工程专家。用户会给你一段想交给 AI 的原始需求，'
+    + '你的唯一任务是把它改写成一条更清晰、更可执行、更少歧义的提示词。',
+    '',
+    '改写规则：',
+    ...BASE_RULES,
+  ]
+  if (focus.length > 0) {
+    lines.push('', '本场景的额外侧重：', ...focus)
+  }
+  if (hasContext) {
+    lines.push(
+      '',
+      '关于对话上下文：',
+      '7. 下面会附上「当前对话的最近几轮」。当原始需求是接着上文说的（省略了主语、'
+      + '引用了"上面那个/刚才的/继续"），用上下文补齐它指代的对象。',
+      '8. 上文已确定的前提（技术栈、口径、风格、已否决的方案）不要改写、不要重复要求，'
+      + '也不要引入与上文冲突的新约束。',
+      '9. 上下文只用来消歧，不要把上文的结论复述进改写结果——输出仍只针对当前这条需求。',
+    )
+  }
+  return lines.join('\n')
+}
 
 const LLM_TIMEOUT_MS = 45_000
 const LLM_MAX_TOKENS = 2048
@@ -255,10 +399,91 @@ function sanitize(text: string): string {
   return t
 }
 
+/**
+ * 从会话历史里挑出最近几轮「人说的话」，供改写时消歧用。
+ *
+ * 只用 user/message：assistant 的回复往往很长（含大段代码/表格），塞进上下文
+ * 既烧 token 又会把改写方向带偏——我们要的是「用户在聊什么」，不是「模型上次答了什么」。
+ * 取 append-origin 事件（isAppendSurfaceEvent）：被替换过的消息在模型可见面里被遮蔽，
+ * 但人看到的对话记录里它仍在，拿替换副本会拿到用户没见过的内容。
+ */
+const CONTEXT_MAX_TURNS = 6
+const CONTEXT_MAX_CHARS = 1200
+
+type ContextTurn = { role: 'user' | 'assistant'; text: string }
+
+/** 把消息 content 压成纯文本（content 可能是字符串或 [{type:'text',text}] 数组）。 */
+function flattenContent(content: any): string {
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  const parts: string[] = []
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue
+    if (typeof (block as any).text === 'string') parts.push((block as any).text)
+  }
+  return parts.join('\n')
+}
+
+async function readSessionContext(ctx: any, sessionId: string): Promise<ContextTurn[]> {
+  if (!isNonEmptyString(sessionId)) return []
+  let query: any
+  try {
+    query = ctx?.get?.('sessionQuery')
+  } catch {
+    return []
+  }
+  if (!query || typeof query.readSession !== 'function') return []
+
+  let loaded: any
+  try {
+    loaded = await query.readSession(sessionId)
+  } catch {
+    return []
+  }
+  const events: any[] = Array.isArray(loaded?.events) ? loaded.events : []
+  if (events.length === 0) return []
+
+  // 从尾部往前取，凑够 CONTEXT_MAX_TURNS 轮就停——长会话不必扫全量。
+  const turns: ContextTurn[] = []
+  for (let i = events.length - 1; i >= 0 && turns.length < CONTEXT_MAX_TURNS; i -= 1) {
+    const ev = events[i]
+    if (!ev || ev.type !== 'user/message') continue
+    if (ev.surfaceOp !== 'append') continue
+    const text = flattenContent(ev.data?.content ?? ev.data?.message?.content).trim()
+    if (!text) continue
+    turns.push({ role: 'user', text })
+  }
+  turns.reverse()
+
+  // 总长兜底：上下文只是消歧辅助，不该把主输入挤到模型窗口外。
+  let budget = CONTEXT_MAX_CHARS
+  const kept: ContextTurn[] = []
+  for (let i = turns.length - 1; i >= 0; i -= 1) {
+    const t = turns[i]
+    if (t.text.length > budget) {
+      // 单条就超预算：截断尾部保留开头（用户的需求通常在前半句）
+      kept.unshift({ role: t.role, text: t.text.slice(0, Math.max(0, budget)) })
+      break
+    }
+    budget -= t.text.length
+    kept.unshift(t)
+  }
+  return kept
+}
+
+/** 把上下文渲染成给模型看的一段前缀文本。 */
+function renderContext(turns: ContextTurn[]): string {
+  if (turns.length === 0) return ''
+  const lines = ['[当前对话的最近几轮，仅用于消歧]']
+  for (const t of turns) lines.push(`用户：${t.text}`)
+  return lines.join('\n')
+}
+
 async function optimizeWithLlm(
   ctx: any,
   raw: string,
   clientSignal?: AbortSignal,
+  contextTurns: ContextTurn[] = [],
 ): Promise<{ ok: boolean; text: string; reason?: string } | null | typeof LLM_ABORTED> {
   let llm: any
   try {
@@ -300,13 +525,19 @@ async function optimizeWithLlm(
     return LLM_ABORTED
   }
 
+  // 场景分流 + 上下文：system 按输入特征选侧重，有历史时把最近几轮人说的话
+  // 拼在用户消息前面（不用多轮 messages：这里要的是「消歧材料」，不是继续对话）。
+  const scene = detectScene(raw)
+  const contextBlock = renderContext(contextTurns)
+  const userText = contextBlock ? `${contextBlock}\n\n[当前要优化的提示词]\n${raw}` : raw
+
   let stream: AsyncIterable<LlmChunk>
   try {
     stream = llm.stream({
       provider: route.provider,
       model: route.model,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: [{ type: 'text', text: raw }] }],
+      system: buildSystemPrompt(scene, contextBlock !== ''),
+      messages: [{ role: 'user', content: [{ type: 'text', text: userText }] }],
       maxTokens: LLM_MAX_TOKENS,
       temperature: 0.3,
       ...(effort ? { reasoningEffort: effort } : {}),
@@ -506,6 +737,9 @@ function createHandler() {
         }
         const raw: string = typeof parsed.text === 'string' ? parsed.text : ''
         const wantMode: string = parsed.mode === 'local' ? 'local' : 'auto'
+        // 客户端从槽位 standardProps 拿到的会话 id；拿不到就是空串（DOM 兜底路径）。
+        // 只用来读历史做消歧，不做鉴权——同源校验已经挡掉跨站调用。
+        const sessionId: string = typeof parsed.sessionId === 'string' ? parsed.sessionId : ''
 
         if (!raw.trim()) {
           sendJson(res, 200, { ok: false, text: raw, reason: '输入框为空，无需优化', mode: 'none' })
@@ -548,7 +782,13 @@ function createHandler() {
           note = `输入超过 ${LLM_MAX_INPUT_CHARS} 字符，已跳过模型改写以控制开销`
         }
         if (wantMode !== 'local' && !tooLongForLlm) {
-          const llmResult = await optimizeWithLlm(ctxRef, raw, clientSignal)
+          // 会话上下文：只在客户端给了 sessionId 且宿主有 sessionQuery 时才有。
+          // 读不到就静默降级——上下文是增强，不是前置条件。
+          const contextTurns = await readSessionContext(ctxRef, sessionId)
+          if (contextTurns.length > 0) {
+            note = `已带入 ${contextTurns.length} 轮对话上下文`
+          }
+          const llmResult = await optimizeWithLlm(ctxRef, raw, clientSignal, contextTurns)
           if (llmResult === LLM_ABORTED) {
             // 用户主动停止：连本地规则也不跑，直接结束（连接多半已断，写不回去也无所谓）
             aborted = true

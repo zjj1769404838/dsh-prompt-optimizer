@@ -12,6 +12,8 @@ A general-purpose plugin. It binds to no project, business domain or internal pa
   - `llm` — uses the model DSH is already connected to (`ctx.llm`). No extra key, no extra account.
   - `local` — pure rule engine (adds a role line and `# 任务` / `# 要求` / `# 输出` sections). No model required.
 - **Shift+click** forces the `local` engine (no model spend, deterministic output).
+- **Scene-aware rewriting, not one template**: the input is classified first (`code` / `writing` / `analysis` / `translate` / `image` / `general`), and each scene gets its own role line, constraint list and output requirement. Code asks for language/framework/runtime, a runnable implementation, boundary and failure handling, verification steps; writing asks for audience and channel, length and tone, only given facts, must-mention and must-avoid; translation asks for unified terminology, register/localisation, translation only. The model-side system prompt appends scene-specific focus rules too, so translation rules never leak into a coding request.
+- **Brings in the last few turns of the current conversation**: on click the client sends the current session id, and the server reads that session's history to disambiguate — the last 6 **user** messages (max 1200 chars) become a context prefix, so “move that button a bit further left” resolves against what came before. Only your own turns are used (assistant replies are long and would burn budget and skew the rewrite), and replaced messages are excluded. When it applies, the toast note says how many turns were included.
 - Rewrites add a role line, the three-section task/requirements/output structure, and constraints such as “conclusion first” and “flag uncertainty instead of inventing it”.
 - **Stoppable mid-flight**: while a rewrite is running the button turns from “Optimize” into “Stop”; click it or press **Esc** to abort immediately, leaving the composer untouched. The server notices the closed connection and kills the model stream too — and it does **not** fall back to the local engine, because stopping means stopping.
 - **Undo after write-back**: the success toast carries an “Undo” action (5 s window) that restores the original text together with its reference chips.
@@ -60,8 +62,9 @@ pnpm run test:llm        # simulates the host: llm / local / fallback paths
 pnpm run test:hardening  # idempotency, 413, 403 (incl. Origin null), beacon allow-list, over-length downgrade, truncation fallback, cancel on disconnect (35 assertions)
 pnpm run test:chips      # reference-chip read filtering, restore, button placement (18 assertions)
 pnpm run test:slot       # host slot registration/render/cleanup, cancel exports + DOM fallback (28 assertions)
+pnpm run test:context    # six-scene routing, idempotency, session-context read and budget (35 assertions)
 pnpm run test:market     # validate docs/market-index.json with the host validator (no write)
-pnpm test                # gates + the four regression suites + market index check
+pnpm test                # gates + the five regression suites + market index check
 ```
 
 - Node logic lives in `src/index.ts`: `optimizeWithLlm()` (reads `ctx.get('llm')` and `ctx.get('agentDefaultModel')`, assembles `text-delta` chunks by hand) and `optimizePrompt()` (local rule fallback).
@@ -136,6 +139,7 @@ All routes live under `/dsh-prompt-optimizer`:
 | Response headers | Always `x-content-type-options: nosniff` |
 | Reference chips | Skill (`/name`) / file / session references are `data-composer-chip` decorator nodes, not prompt text: skipped on read, restored by relative offset on write. When there is only a reference and no body text, the button says “只有引用，没有提示词可优化” and sends no request |
 | Write-back stability | The composer is a Lexical editor: after setting the DOM selection programmatically you must wait for `selectionchange` so Lexical's internal `_selection` syncs before calling `execCommand`, otherwise Lexical decides the selection is inconsistent and takes over the input (symptom: “you have to select text first”). After writing, wait a tick and read back; retry once if a re-render reverted it, then fall back to direct DOM write. The wait is `rAF×2` **plus a 50 ms `setTimeout` backstop** — hidden tabs stop firing rAF entirely, and relying on rAF alone leaves the button permanently disabled (since 0.1.8) |
+| Session context | A request may carry `sessionId`; the server then reads that session's history for disambiguation — only `user/message` events with `surfaceOp === "append"`, the last **6 turns**, at most **1200 chars** (a single over-budget turn is truncated at the tail so the head survives). Any failure (service missing / session unknown / read throws) degrades silently to “no context” and never breaks the rewrite. `sessionId` is used for reading only and **is not an auth credential** — the same-origin check already blocks cross-site calls, and the history is only returned to the caller of that same session (since 0.1.9) |
 | Concurrent rewrite | Before writing back, the composer is re-read and compared with the snapshot taken at click time (trimmed text; chips excluded). On mismatch the result is discarded with a “content changed” notice, so work typed during the wait is never clobbered (since 0.1.8) |
 
 > `/beacon` reports DOM structure only (selectors, class names, placement mode, counts) — never user input. The server re-filters through the allow-list, so even a mistaken client report cannot persist page text.
