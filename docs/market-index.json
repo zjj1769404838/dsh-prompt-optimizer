@@ -57,11 +57,11 @@
       "versions": [
         {
           "version": "0.1.10",
-          "publishTimestamp": 1793475236,
+          "publishTimestamp": 1793476001,
           "source": {
             "type": "git",
             "url": "https://github.com/zjj1769404838/dsh-prompt-optimizer.git",
-            "commit": "5fd83b075953502b63b809f40d11271936868f4d"
+            "commit": "24b86a5cecdf80007833125cc44de24439b00099"
           },
           "engines": {
             "dsh": ">=0.2.0-rc.1 <0.3.0-0"
