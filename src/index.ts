@@ -8,7 +8,7 @@ export const inject = ['webServer']
 
 const ROUTE_PREFIX = '/dsh-prompt-optimizer'
 // 与 package.json 的 version 保持一致（scripts/gates/run.mjs 会校验两者相等）
-const PLUGIN_VERSION = '0.1.9'
+const PLUGIN_VERSION = '0.1.10'
 
 // 请求体上限：/optimize 与 /beacon 都是本地小载荷，超过一律 413，
 // 避免任何同机进程用超大 body 把宿主进程的内存吃满。
@@ -20,6 +20,8 @@ const BEACON_KEYS = [
   'stage', 'build', 'kind', 'tag', 'cls', 'via', 'anchorCls',
   'missCount', 'wrote', 'mode', 'len', 'err', 'digitNodes', 'dotCount', 'note',
   'chips', 'chipsRestored',
+  // 0.1.10 乱码排障用：只记「取了几轮 / 拦下几段注入 / 有没有走泄漏兜底」，仍是结构性计数
+  'ctxTurns', 'ctxSkipped', 'scene', 'leakGuarded',
 ]
 
 // ─── 本地规则引擎（回退路径，纯函数，不联网、不依赖密钥）───
@@ -406,11 +408,39 @@ function sanitize(text: string): string {
  * 既烧 token 又会把改写方向带偏——我们要的是「用户在聊什么」，不是「模型上次答了什么」。
  * 取 append-origin 事件（isAppendSurfaceEvent）：被替换过的消息在模型可见面里被遮蔽，
  * 但人看到的对话记录里它仍在，拿替换副本会拿到用户没见过的内容。
+ *
+ * ★ 关键判据是 `data.source.kind === 'user'`（宿主自己的分类字段，不是文本猜测）：
+ * user/message + append 里混着大量**平台注入的伪用户消息**——运行环境快照（runtime-context）、
+ * 记忆块、可用技能目录、压缩检查点（compact-checkpoint）、回滚替身（dsh-rewind）等。
+ * 0.1.9 只按 type/surfaceOp 取，把这些注入块当「用户历史」喂给模型，模型原样抄进产物，
+ * 再被字符预算拦腰截断 —— 用户看到的就是「乱码」。宿主代码本身就用这个字段判归属
+ * （dsh-agent-loop 的 `message.source.kind === 'runtime-context'`；
+ * dsh-api-session-controller 的真人输入 `source: { kind: 'user', rpcId }`）。
+ * 因此这里用**允许列表**：证明不了是真人打的，就不当上下文用。
  */
 const CONTEXT_MAX_TURNS = 6
 const CONTEXT_MAX_CHARS = 1200
 
+/** 宿主自己往会话里写的东西，绝不允许出现在写回的提示词里。 */
+const CONTEXT_HEADER = '[当前对话的最近几轮，仅用于消歧]'
+const PROMPT_HEADER = '[当前要优化的提示词]'
+const HOST_LEAK_MARKERS = [
+  'Current runtime context',
+  'This snapshot supersedes earlier runtime-context snapshots',
+  '<memory_system>',
+  '[记忆系统',
+  '[记忆维护底线',
+  '[白板 PLAN.md',
+  'dsh-prompt-optimizer',
+  '<available_skills>',
+  '<system-reminder>',
+  'type:state',
+  'type:progress',
+  'acp tokens=',
+]
+
 type ContextTurn = { role: 'user' | 'assistant'; text: string }
+type SessionContext = { turns: ContextTurn[]; skipped: number }
 
 /** 把消息 content 压成纯文本（content 可能是字符串或 [{type:'text',text}] 数组）。 */
 function flattenContent(content: any): string {
@@ -424,32 +454,50 @@ function flattenContent(content: any): string {
   return parts.join('\n')
 }
 
-async function readSessionContext(ctx: any, sessionId: string): Promise<ContextTurn[]> {
-  if (!isNonEmptyString(sessionId)) return []
+// 事件投影：宿主存的是「事件」，`data` 多半就是消息本体（dsh-agent-loop 里
+// `append("user/message", message, ...)`），但历史格式可能是 `data.message`。
+// 两种都试，判据用结构化字段，不做文本猜测。
+function eventMessage(ev: any): any {
+  const d = ev?.data
+  if (!d || typeof d !== 'object') return null
+  return typeof d.role === 'string' ? d : (d.message ?? null)
+}
+
+async function readSessionContext(ctx: any, sessionId: string): Promise<SessionContext> {
+  if (!isNonEmptyString(sessionId)) return { turns: [], skipped: 0 }
   let query: any
   try {
     query = ctx?.get?.('sessionQuery')
   } catch {
-    return []
+    return { turns: [], skipped: 0 }
   }
-  if (!query || typeof query.readSession !== 'function') return []
+  if (!query || typeof query.readSession !== 'function') return { turns: [], skipped: 0 }
 
   let loaded: any
   try {
     loaded = await query.readSession(sessionId)
   } catch {
-    return []
+    return { turns: [], skipped: 0 }
   }
   const events: any[] = Array.isArray(loaded?.events) ? loaded.events : []
-  if (events.length === 0) return []
+  if (events.length === 0) return { turns: [], skipped: 0 }
 
   // 从尾部往前取，凑够 CONTEXT_MAX_TURNS 轮就停——长会话不必扫全量。
   const turns: ContextTurn[] = []
+  let skipped = 0
   for (let i = events.length - 1; i >= 0 && turns.length < CONTEXT_MAX_TURNS; i -= 1) {
     const ev = events[i]
     if (!ev || ev.type !== 'user/message') continue
     if (ev.surfaceOp !== 'append') continue
-    const text = flattenContent(ev.data?.content ?? ev.data?.message?.content).trim()
+    const msg = eventMessage(ev)
+    // ★ 允许列表：只认宿主标为 'user' 的真人输入。kind 缺失或为其它值
+    //（runtime-context / compact-checkpoint / dsh-rewind / memory / 技能目录…）
+    // 一律跳过——这些是平台注入的伪用户消息，进上下文就是污染。
+    if (msg?.source?.kind !== 'user') {
+      skipped += 1
+      continue
+    }
+    const text = flattenContent(msg.content ?? msg.message?.content).trim()
     if (!text) continue
     turns.push({ role: 'user', text })
   }
@@ -468,15 +516,40 @@ async function readSessionContext(ctx: any, sessionId: string): Promise<ContextT
     budget -= t.text.length
     kept.unshift(t)
   }
-  return kept
+  return { turns: kept, skipped }
 }
 
 /** 把上下文渲染成给模型看的一段前缀文本。 */
 function renderContext(turns: ContextTurn[]): string {
   if (turns.length === 0) return ''
-  const lines = ['[当前对话的最近几轮，仅用于消歧]']
+  const lines = [CONTEXT_HEADER]
   for (const t of turns) lines.push(`用户：${t.text}`)
   return lines.join('\n')
+}
+
+/**
+ * 泄漏兜底：即使上游过滤漏了，宿主注入文本也绝不能写回输入框。
+ * 判据分两类，任一命中即判为「本次模型输出不可用」：
+ * ① 模型把我们的脚手架标题原样回显（说明它把上下文当成了正文）；
+ * ② 产物里出现宿主自己写进会话的结构（runtime-context 快照、记忆系统块、
+ *    技能目录、压缩标记、本插件自身的路由/包名等）——真用户的提示词不会含这些。
+ * 宁可退回本地规则，也不把带宿主内部信息的半截文本盖到用户输入上。
+ */
+function detectLeak(text: string, raw: string): string | null {
+  if (!text) return null
+  const haystack = raw.toLowerCase()
+  const hits = (marker: string): boolean => {
+    // 用户自己写的提示词里本来就有的内容不算泄漏：那说明这段文字来自输入，
+    // 不是模型把宿主内部块抄了出来（本插件名/路由在开发会话里就是常词）。
+    if (haystack.includes(marker.toLowerCase())) return false
+    return text.includes(marker)
+  }
+  if (hits(CONTEXT_HEADER)) return 'context-header'
+  if (hits(PROMPT_HEADER)) return 'prompt-header'
+  for (const marker of HOST_LEAK_MARKERS) {
+    if (hits(marker)) return marker
+  }
+  return null
 }
 
 async function optimizeWithLlm(
@@ -484,6 +557,7 @@ async function optimizeWithLlm(
   raw: string,
   clientSignal?: AbortSignal,
   contextTurns: ContextTurn[] = [],
+  diag?: { leakGuarded?: string },
 ): Promise<{ ok: boolean; text: string; reason?: string } | null | typeof LLM_ABORTED> {
   let llm: any
   try {
@@ -556,6 +630,13 @@ async function optimizeWithLlm(
     if (truncated) return null
     const text = sanitize(rawText)
     if (!text) return null
+    // 泄漏兜底：模型把我们的脚手架标题或宿主内部结构抄进正文时，这份产物一律作废，
+    // 回退本地规则。判据命中情况通过 diag 带回调用方，只上报标记、不上报文本。
+    const leak = detectLeak(text, raw)
+    if (leak) {
+      if (diag) diag.leakGuarded = leak
+      return null
+    }
     return { ok: true, text }
   } catch (err) {
     // 用户停止优先于超时判定（两者都会 abort，顺序反了会把「我按了停止」说成超时）
@@ -673,6 +754,20 @@ function isSameOrigin(req: any): boolean {
 // ─── 排障信标：客户端把看到的 DOM 结构回传，存内存供 /beacon 读取 ───
 const beacons: any[] = []
 const MAX_BEACONS = 50
+// 启动类信标（每次硬刷新各贡献 4 条）。反复刷新会把它们堆满环形缓冲，
+// 把真正有价值的 optimize 类证据挤掉——0.1.9 排障时就是这样丢了现场。
+// 因此超限时**先淘汰启动类**，只有启动类全清了才动 optimize 类。
+const BOOT_STAGES = new Set(['boot', 'dom-ready', 'slot-registered', 'injected'])
+
+function evictBeacons(): void {
+  if (beacons.length <= MAX_BEACONS) return
+  const firstBoot = beacons.findIndex((b) => BOOT_STAGES.has(String(b?.stage)))
+  if (firstBoot >= 0) {
+    beacons.splice(firstBoot, 1)
+    return
+  }
+  beacons.splice(0, beacons.length - MAX_BEACONS)
+}
 
 /** 只保留白名单里的结构性字段，且字符串截断——信标绝不能承载页面文本或用户输入。 */
 function sanitizeBeacon(input: any): Record<string, unknown> {
@@ -766,6 +861,11 @@ function createHandler() {
         let mode = 'local'
         let note: string | undefined
         let aborted = false
+        // 排障计数（0.1.10）：取了几轮真人历史、拦下几段平台注入。只回传数字，不回传内容。
+        let ctxTurns = 0
+        let ctxSkipped = 0
+        // 泄漏兜底命中的标记（非空说明模型产物被判定含宿主内部内容并已回退本地规则）。
+        let leakGuarded = ''
 
         // 客户端断开（用户点「停止」/ 关标签页）时把 abort 传进模型流，
         // 否则服务端会一直跑满 45s 才收手，白烧 token。
@@ -784,11 +884,17 @@ function createHandler() {
         if (wantMode !== 'local' && !tooLongForLlm) {
           // 会话上下文：只在客户端给了 sessionId 且宿主有 sessionQuery 时才有。
           // 读不到就静默降级——上下文是增强，不是前置条件。
-          const contextTurns = await readSessionContext(ctxRef, sessionId)
-          if (contextTurns.length > 0) {
-            note = `已带入 ${contextTurns.length} 轮对话上下文`
+          const context = await readSessionContext(ctxRef, sessionId)
+          ctxTurns = context.turns.length
+          // skipped 是「被拦下的伪用户消息」计数：正常会话里它应该 > 0（宿主本来就在注入
+          // 运行环境/记忆块）。若某次产物又出问题，这个数能区分「过滤没生效」和「过滤生效了但模型仍抄了别的」。
+          ctxSkipped = context.skipped
+          if (context.turns.length > 0) {
+            note = `已带入 ${context.turns.length} 轮对话上下文`
           }
-          const llmResult = await optimizeWithLlm(ctxRef, raw, clientSignal, contextTurns)
+          const llmDiag: { leakGuarded?: string } = {}
+          const llmResult = await optimizeWithLlm(ctxRef, raw, clientSignal, context.turns, llmDiag)
+          if (llmDiag.leakGuarded) leakGuarded = llmDiag.leakGuarded
           if (llmResult === LLM_ABORTED) {
             // 用户主动停止：连本地规则也不跑，直接结束（连接多半已断，写不回去也无所谓）
             aborted = true
@@ -812,6 +918,13 @@ function createHandler() {
           reason: result.reason ?? null,
           mode,
           ...(note ? { note } : {}),
+          // 排障字段（0.1.10）：只有计数与标记，没有任何用户文本。客户端原样进信标白名单。
+          diag: {
+            scene: detectScene(raw),
+            ctxTurns,
+            ctxSkipped,
+            ...(leakGuarded ? { leakGuarded } : {}),
+          },
         })
         return
       }
@@ -840,7 +953,7 @@ function createHandler() {
             parsed = {}
           }
           beacons.push(sanitizeBeacon(parsed))
-          if (beacons.length > MAX_BEACONS) beacons.splice(0, beacons.length - MAX_BEACONS)
+          evictBeacons()
           sendJson(res, 200, { ok: true })
           return
         }

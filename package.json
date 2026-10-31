@@ -1,6 +1,6 @@
 {
   "name": "@zjj/dsh-prompt-optimizer",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "DSH 输入框「优化」按钮：一键把口语化输入改写成结构化提示词。优先复用宿主已连接模型（ctx.llm），不可用时回退本地规则引擎，零配置可用。",
   "type": "module",
   "main": "lib/index.js",

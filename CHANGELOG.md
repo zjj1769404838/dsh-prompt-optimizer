@@ -2,6 +2,22 @@
 
 本文件记录 `@zjj/dsh-prompt-optimizer` 的所有重要变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.10] — 2026-11-01
+
+### 修复
+
+- **上下文不再带入平台注入的伪用户消息（乱码根因）**。`user/message` + `append` 里混着宿主自己写进会话的块：运行环境快照（`runtime-context`）、时间快照（`time-context`）、技能目录（`skill-catalog`）、模型选择、回滚替身、记忆系统块、压缩检查点等。真机实测本会话 824 条 `user/message` 中只有 51 条是真人输入，其余 773 条全是注入。0.1.9 按 `type`/`surfaceOp` 取历史，把注入块当「用户历史」喂给模型；模型原样（或改写成「当前项目工作目录…」）抄进产物，再被 1200 字符预算拦腰截断——写回输入框就是乱码。现在按宿主的分类字段 `data.source.kind === 'user'` 做**允许列表**：证明不了是真人打的，一律不进上下文（宿主源码本身就这么判归属：`dsh-api-session-controller:3224` 真人输入带 `source:{kind:'user',rpcId}`）。
+- **泄漏兜底 `detectLeak()`**。即使过滤被绕过，产物里出现我们的脚手架标题（`[当前对话的最近几轮…]` / `[当前要优化的提示词]`）或宿主结构标记（`Current runtime context`、`<memory_system>`、`<available_skills>`、`type:state`、`acp tokens=`、本插件路由名等）时，判定本次模型输出不可用，回退本地规则，绝不把宿主内部信息写回输入框。用户输入里本来就含同名词时不误判（那说明文字来自输入本身）。
+- **信标抗挤出**。`/beacon` 环形缓冲满时优先淘汰 `boot` / `dom-ready` / `slot-registered` / `injected` 这类启动噪声，保留 `optimized` / `optimize-*` 证据。此前排障就是栽在「用户点击那次的信标被后续硬刷新的启动噪声冲掉」。
+
+### 新增
+
+- **响应与信标带上下文字段**：`diag.ctxTurns`（带入的真人轮数）、`diag.ctxSkipped`（被允许列表挡下的注入块数）、`diag.leak`（泄漏兜底命中的标记）。排障时一眼能看出「上下文取了几条、拦了几条、有没有漏网」，不用再猜。
+
+### 测试
+
+- `scripts/test-context.mjs` 从 35 条扩到 **81 条**：允许列表对真机实测到的全部 7 类注入 kind + 源码里的 3 类（`compact-checkpoint` / `tool-registry` / `memory`）逐类断言「拦得下、真人轮保留、计入 skipped」；`source` 缺失的旧格式事件不用为上下文；泄漏回显三类断言各带「确实走了模型路径」前置（防空值恒真）；信标抗挤出 3 条。全量回归：gates + llm-path 4 路径 + hardening 35 + chips 18 + slot 28 + context 81 + market-index 全绿。
+
 ## [0.1.9] — 2026-10-31
 
 ### 变更

@@ -133,15 +133,34 @@ function makeSessionQuery(events) {
   }
 }
 
-function userEvent(text, surfaceOp = 'append') {
-  return { type: 'user/message', seq: 1, surfaceOp, data: { role: 'user', content: [{ type: 'text', text }] } }
+function userEvent(text, surfaceOp = 'append', kind = 'user') {
+  // 0.1.10：宿主用 data.source.kind 区分真人输入与平台注入。
+  // 测试夹具必须带上这个字段，否则会被允许列表全部拦下（那等于测试没覆盖真实形状）。
+  return {
+    type: 'user/message',
+    seq: 1,
+    surfaceOp,
+    data: { role: 'user', source: { kind }, content: [{ type: 'text', text }] },
+  }
 }
+
+// 平台注入的伪用户消息：type/surfaceOp 与真人输入完全相同，只有 source.kind 不同。
+// 前 7 个是真机实测到的（本会话磁盘逐帧解码），后 3 个来自宿主源码（compact-checkpoint
+// dsh-compaction:109、tool-registry dsh-agent-loop:1271、memory 记忆块注入路径）。
+const INJECTED_KINDS = [
+  'runtime-context', 'time-context', 'skill-catalog', 'model-selection',
+  'dsh-rewind', 'dsh-mnemon', 'user-approval',
+  'compact-checkpoint', 'tool-registry', 'memory',
+]
 
 let capturedOpts = null
 const ctxWithContext = makeCtx({
   sessionQuery: makeSessionQuery([
     userEvent('我在做一个 DSH 插件，跑在桌面端'),
     { type: 'assistant/message', seq: 2, surfaceOp: 'append', data: { message: { role: 'assistant', content: [{ type: 'text', text: '很长的一大段回复' }] } } },
+    // 平台注入的伪用户消息：type/surfaceOp 与真人输入一模一样，必须被允许列表挡掉
+    userEvent('Current runtime context. This snapshot supersedes earlier runtime-context snapshots. Current working directory: "D:\\\\my-projects".', 'append', 'runtime-context'),
+    userEvent('<memory_system> 记忆系统纪律全文，含白板 PLAN.md 与交接账本路径', 'append', 'memory'),
     userEvent('那个按钮位置还是不对'),
     // 被替换过的消息不该进上下文（用户没见过的内容）
     userEvent('这条是被替换掉的', 'replace'),
@@ -166,6 +185,15 @@ check('上下文/用户消息含历史轮', userText.includes('我在做一个 D
 check('上下文/只取 user 消息（不含 assistant 长回复）', !userText.includes('很长的一大段回复'))
 check('上下文/排除被替换的消息', !userText.includes('这条是被替换掉的'))
 check('上下文/当前提示词仍完整保留', userText.includes('那个再往左挪一点'))
+// ★ 0.1.10 乱码根因回归：注入块绝不能进上下文（0.1.9 就是栽在这里）
+check('污染/排除 runtime-context 注入块', !userText.includes('Current runtime context'), userText.slice(0, 200))
+check('污染/排除 memory 注入块', !userText.includes('<memory_system>'))
+check('污染/注入文本不出现在任何写回内容里', !String(withCtx.json?.text ?? '').includes('Current working directory'))
+// diag：真人 2 轮 + 拦下 2 段注入
+check('diag/scene 有值', typeof withCtx.json?.diag?.scene === 'string' && withCtx.json.diag.scene.length > 0, JSON.stringify(withCtx.json?.diag))
+check('diag/ctxTurns 只数真人轮', withCtx.json?.diag?.ctxTurns === 2, `实际 ${withCtx.json?.diag?.ctxTurns}`)
+check('diag/ctxSkipped 记下被拦的注入', withCtx.json?.diag?.ctxSkipped === 2, `实际 ${withCtx.json?.diag?.ctxSkipped}`)
+check('diag/未命中泄漏兜底时不带 leakGuarded', !('leakGuarded' in (withCtx.json?.diag ?? {})), JSON.stringify(withCtx.json?.diag))
 
 // 没有 sessionId：不该带上下文，也不该崩
 capturedOpts = null
@@ -213,6 +241,136 @@ const longUserText = longOpts?.messages?.[0]?.content?.[0]?.text ?? ''
 check('上下文/超长历史确实走了模型路径', longOpts !== null)
 check('上下文/历史被截断到预算内', longUserText.length > 0 && longUserText.length <= 1200 + 200, `实际 ${longUserText.length}`)
 check('上下文/保留的是最近几轮', longUserText.includes('第 19 轮') || longUserText.includes('第 18 轮'))
+
+// ─── ⑤ 泄漏兜底：即使过滤漏了，宿主内部文本也不能写回 ───
+// 前两条断言必须先确认「确实走了模型路径」，否则被前置校验提前拒绝时
+// 「产物里没有 X」会对空串恒真 —— 那是假绿。
+async function leakCase(name, modelOutput, payloadText) {
+  let opts = null
+  const c = makeCtx({
+    streamOverride: (o) => {
+      opts = o
+      return (async function* () {
+        yield { type: 'text-delta', text: modelOutput }
+        yield { type: 'finish', reason: 'stop' }
+      })()
+    },
+  })
+  const r = await call(c, { payload: { text: payloadText, mode: 'auto' } })
+  check(`${name}/确实走了模型路径`, opts !== null)
+  check(`${name}/回退本地规则`, r.json?.mode === 'local', JSON.stringify(r.json)?.slice(0, 120))
+  check(`${name}/产物不含宿主文本`, !String(r.json?.text ?? '').includes(modelOutput.slice(0, 24)))
+  check(`${name}/diag 记下泄漏标记`, typeof r.json?.diag?.leakGuarded === 'string' && r.json.diag.leakGuarded.length > 0, JSON.stringify(r.json?.diag))
+}
+
+await leakCase(
+  '泄漏/回显上下文标题',
+  '# 任务\n[当前对话的最近几轮，仅用于消歧]\n用户：某段历史\n# 要求\n- 结构清晰',
+  '帮我写个登录页面',
+)
+await leakCase(
+  '泄漏/抄了运行环境快照',
+  '你是一位资深软件工程师。\n# 任务\nCurrent runtime context. Current working directory: "D:\\\\my-projects".\n# 要求\n- 可运行',
+  '帮我写个登录页面',
+)
+await leakCase(
+  '泄漏/抄了记忆系统块',
+  '你是一位资深软件工程师。\n# 任务\n<memory_system> 自动记忆已启用，白板 PLAN.md 需要重写\n# 要求\n- 可运行',
+  '帮我写个登录页面',
+)
+
+// 反例：用户自己的提示词里本来就含这些词时不该误判（否则正常输入被无端降级）
+const benign = await call(makeCtx({
+  streamOverride: () => (async function* () {
+    yield { type: 'text-delta', text: '你是一位资深软件工程师。\n# 任务\n把 dsh-prompt-optimizer 的按钮挪到左边' }
+    yield { type: 'finish', reason: 'stop' }
+  })(),
+}), { payload: { text: '帮我优化 dsh-prompt-optimizer 的按钮位置说明', mode: 'auto' } })
+check('泄漏/用户自带同名词时不误判', benign.json?.mode === 'llm', JSON.stringify(benign.json)?.slice(0, 160))
+
+// ─── ⑥ 允许列表必须挡住真机里出现过的全部注入 kind ───
+// kind 清单来自本会话磁盘事件实测（session.v4.jsonl.zstd 逐帧解码）：
+// 824 条 user/message 里只有 51 条是 kind:'user'，其余为 runtime-context 629 /
+// time-context 82 / skill-catalog 36 / model-selection 14 / dsh-rewind 8 /
+// dsh-mnemon 3 / user-approval 1 —— 逐类都要证明进不了上下文。
+for (const kind of INJECTED_KINDS) {
+  let o = null
+  const c = makeCtx({
+    sessionQuery: makeSessionQuery([
+      userEvent('真实的一句需求', 'append', 'user'),
+      userEvent(`${kind} 注入的宿主内部文本`, 'append', kind),
+    ]),
+    streamOverride: (opts) => {
+      o = opts
+      return (async function* () {
+        yield { type: 'text-delta', text: '优化结果' }
+        yield { type: 'finish', reason: 'stop' }
+      })()
+    },
+  })
+  const r = await call(c, { payload: { text: '帮我把按钮挪到左边', mode: 'auto', sessionId: 's1' } })
+  const ut = o?.messages?.[0]?.content?.[0]?.text ?? ''
+  check(`允许列表/${kind} 被拦下`, o !== null && !ut.includes(`${kind} 注入的宿主内部文本`), ut.slice(0, 120))
+  check(`允许列表/${kind} 仍保留真人轮`, r.json?.diag?.ctxTurns === 1 && r.json?.diag?.ctxSkipped === 1, JSON.stringify(r.json?.diag))
+}
+// kind 缺失（历史格式/未知来源）也不允许进上下文：证明不了是真人打的就不用
+{
+  let o = null
+  const c = makeCtx({
+    sessionQuery: makeSessionQuery([
+      { type: 'user/message', seq: 1, surfaceOp: 'append', data: { role: 'user', content: [{ type: 'text', text: '没有 source 字段的旧格式事件' }] } },
+    ]),
+    streamOverride: (opts) => {
+      o = opts
+      return (async function* () {
+        yield { type: 'text-delta', text: '优化结果' }
+        yield { type: 'finish', reason: 'stop' }
+      })()
+    },
+  })
+  const r = await call(c, { payload: { text: '帮我把按钮挪到左边', mode: 'auto', sessionId: 's1' } })
+  check('允许列表/source 缺失时不用为上下文', o !== null && !((o.messages?.[0]?.content?.[0]?.text ?? '').includes('没有 source 字段的旧格式事件')))
+  check('允许列表/source 缺失计入 skipped', r.json?.diag?.ctxTurns === 0 && r.json?.diag?.ctxSkipped === 1, JSON.stringify(r.json?.diag))
+  check('允许列表/source 缺失时不注入上下文规则', !(o?.system ?? '').includes('关于对话上下文'))
+}
+
+// ─── ⑦ 信标抗挤出：启动噪声不能把 optimize 证据挤掉 ───
+// 0.1.9 排障时就是栽在这：用户点击那次的信标被后续硬刷新的 boot 噪声冲掉了。
+async function postBeacon(payload) {
+  const c = makeCtx()
+  apply(c)
+  const handler = c.handlers[0].handler
+  const res = { statusCode: 0, writeHead(s) { this.statusCode = s }, end() {}, once() {} }
+  const buf = Buffer.from(JSON.stringify(payload), 'utf8')
+  await handler({
+    url: '/dsh-prompt-optimizer/beacon',
+    method: 'POST',
+    headers: { host: '127.0.0.1:1' },
+    on(ev, cb) { if (ev === 'data') cb(buf); if (ev === 'end') cb() },
+    removeListener() {}, pause() {}, once() {}, destroy() {},
+  }, res)
+  return res.statusCode
+}
+
+async function getBeacons() {
+  const c = makeCtx()
+  apply(c)
+  const handler = c.handlers[0].handler
+  let body = ''
+  const res = { statusCode: 0, writeHead(s) { this.statusCode = s }, end(b) { body = Buffer.from(b ?? '').toString('utf8') }, once() {} }
+  await handler({ url: '/dsh-prompt-optimizer/beacon', method: 'GET', headers: { host: '127.0.0.1:1' }, on() {}, destroy() {} }, res)
+  try { return JSON.parse(body) } catch { return { count: 0, beacons: [] } }
+}
+
+// 先灌 40 条启动噪声，再放一条真正有价值的 optimize 证据，然后再灌 30 条噪声
+for (let i = 0; i < 40; i += 1) await postBeacon({ stage: 'boot', build: 'dspo-v13' })
+await postBeacon({ stage: 'optimized', mode: 'llm', ctxTurns: 2, ctxSkipped: 7, scene: 'code' })
+for (let i = 0; i < 30; i += 1) await postBeacon({ stage: 'dom-ready', build: 'dspo-v13' })
+const snap = await getBeacons()
+const keep = (snap.beacons ?? []).find((b) => b.stage === 'optimized')
+check('信标/总数受上限约束', snap.count <= 50, `count=${snap.count}`)
+check('信标/optimize 证据未被启动噪声挤掉', Boolean(keep))
+check('信标/optimize 证据带上排障计数', keep?.ctxSkipped === 7 && keep?.ctxTurns === 2)
 
 console.log(`\n[context] ${failures === 0 ? 'all passed' : `${failures} failed`}`)
 if (failures > 0) process.exitCode = 1

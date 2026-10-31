@@ -8,7 +8,7 @@ export const inject: string[] = ['slots']
 
 // 构建标记：出现在每个信标里，用于判断浏览器跑的是不是最新产物
 // （客户端代码改动必须用户硬刷新才生效，普通刷新命中模块缓存）
-const BUILD = 'dspo-v12'
+const BUILD = 'dspo-v13'
 
 const ROUTE = 'dsh-prompt-optimizer'
 
@@ -107,7 +107,15 @@ async function optimizeRequest(
   text: string,
   mode: 'auto' | 'local' = 'auto',
   external?: AbortController | null,
-): Promise<{ ok: boolean; text: string; reason?: string; mode?: string; note?: string }> {
+): Promise<{
+  ok: boolean
+  text: string
+  reason?: string
+  mode?: string
+  note?: string
+  // 0.1.10 排障字段：纯计数与标记，不含任何用户文本
+  diag?: { scene?: string; ctxTurns?: number; ctxSkipped?: number; leakGuarded?: string }
+}> {
   // 优先用外部（可被「停止」按钮 abort 的）controller；拿不到时退回内部超时用的一次性 controller
   const controller = external ?? (typeof AbortController !== 'undefined' ? new AbortController() : null)
   const timer = controller
@@ -128,7 +136,7 @@ async function optimizeRequest(
       err.status = res.status
       throw err
     }
-    return (await res.json()) as { ok: boolean; text: string; reason?: string; mode?: string; note?: string }
+    return (await res.json()) as any
   } finally {
     if (timer) window.clearTimeout(timer)
   }
@@ -720,6 +728,12 @@ async function runOptimize(btn: HTMLButtonElement, forceLocal: boolean): Promise
         wrote,
         chips: chips.length,
         chipsRestored: lastChipRestore.restored,
+        // 乱码排障（0.1.10）：把服务端的结构性计数带进信标。只有数字与标记，没有文本。
+        // ctxSkipped > 0 说明平台注入被拦下了；leakGuarded 非空说明泄漏兜底触发并已回退本地规则。
+        scene: data.diag?.scene,
+        ctxTurns: data.diag?.ctxTurns,
+        ctxSkipped: data.diag?.ctxSkipped,
+        leakGuarded: data.diag?.leakGuarded,
       })
     } else {
       // ok=false 是「无需改动」的正常分支，文案直接取服务端原因
