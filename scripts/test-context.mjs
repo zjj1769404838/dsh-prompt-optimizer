@@ -147,10 +147,14 @@ function userEvent(text, surfaceOp = 'append', kind = 'user') {
 // 平台注入的伪用户消息：type/surfaceOp 与真人输入完全相同，只有 source.kind 不同。
 // 前 7 个是真机实测到的（本会话磁盘逐帧解码），后 3 个来自宿主源码（compact-checkpoint
 // dsh-compaction:109、tool-registry dsh-agent-loop:1271、memory 记忆块注入路径）。
+// 真机逐帧解码统计到的注入 kind（两个不同工作区的长会话实测合并）：
+// 白名单判据是 kind === 'user'，这里逐个验证「其余一律拦不住」。
+// 少列一种 = 未来有人把它改成拒绝列表时该 kind 静默通过。
 const INJECTED_KINDS = [
   'runtime-context', 'time-context', 'skill-catalog', 'model-selection',
   'dsh-rewind', 'dsh-mnemon', 'user-approval',
   'compact-checkpoint', 'tool-registry', 'memory',
+  'skill-invocation', 'tool-jobs', 'agent-message', 'subagent-settled',
 ]
 
 let capturedOpts = null

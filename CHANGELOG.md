@@ -16,7 +16,8 @@
 
 ### 测试
 
-- `scripts/test-context.mjs` 从 35 条扩到 **81 条**：允许列表对真机实测到的全部 7 类注入 kind + 源码里的 3 类（`compact-checkpoint` / `tool-registry` / `memory`）逐类断言「拦得下、真人轮保留、计入 skipped」；`source` 缺失的旧格式事件不用为上下文；泄漏回显三类断言各带「确实走了模型路径」前置（防空值恒真）；信标抗挤出 3 条。全量回归：gates + llm-path 4 路径 + hardening 35 + chips 18 + slot 28 + context 81 + market-index 全绿。
+- `scripts/test-context.mjs` 从 35 条扩到 **89 条**：允许列表对真机实测到的全部 14 类注入 kind 逐类断言「拦得下、真人轮保留、计入 skipped」（`runtime-context` / `time-context` / `skill-catalog` / `model-selection` / `dsh-rewind` / `dsh-mnemon` / `user-approval` / `skill-invocation` / `tool-jobs` / `agent-message` / `subagent-settled` / `compact-checkpoint` / `tool-registry` / `memory`）；`source` 缺失的旧格式事件不用为上下文；泄漏回显三类断言各带「确实走了模型路径」前置（防空值恒真）；信标抗挤出 3 条。全量回归：gates + llm-path 4 路径 + hardening 35 + chips 18 + slot 28 + context 89 + market-index 全绿。
+- **真机会话直接验证**（不是模拟数据）：逐帧解码另一个工作区的真实会话 `--D-my-projects-games-dnfm-arena--`，900 条 `user/message` + `append` 中真人只有 37 条，其余 863 条为注入；把这份真实事件流喂给插件自己的 handler，`diag` 报 `ctxTurns: 6 / ctxSkipped: 116`，模型请求文本里 **0 种注入 kind 的原文片段**，产物为干净的结构化提示词。取证脚本 `D:/my-projects/.scratch/dspo-probe/probe-real-context.mjs`。
 
 ## [0.1.9] — 2026-10-31
 
