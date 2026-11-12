@@ -1,7 +1,7 @@
-// @zjj/dsh-prompt-optimizer node half
+// @zjjlivingfree/dsh-prompt-optimizer node half
 // 优先调用 DSH 已连接模型（ctx.llm）做语义级提示词改写；
 // 不可用时回退本地规则引擎（optimizePrompt），保证零配置也能用。
-export const name = '@zjj/dsh-prompt-optimizer'
+export const name = '@zjjlivingfree/dsh-prompt-optimizer'
 // 注意：不把 'llm' 写进 inject —— 该服务是可选的，缺失时插件仍需能启动。
 // 运行期用 ctx.get('llm') 容错读取（与官方 dsh-better-sidebar 同一模式）。
 export const inject = ['webServer']
@@ -798,7 +798,7 @@ function createHandler() {
       if (method === 'GET' && route === '/health') {
         sendJson(res, 200, {
           status: 'ok',
-          plugin: '@zjj/dsh-prompt-optimizer',
+          plugin: '@zjjlivingfree/dsh-prompt-optimizer',
           version: PLUGIN_VERSION,
           uptime: process.uptime(),
           engine: 'llm-first',
@@ -973,7 +973,7 @@ export function apply(ctx: any) {
   ctxRef = ctx
   const webServer = ctx?.webServer
   if (webServer === undefined || typeof webServer.register !== 'function') {
-    ctx?.logger?.warn?.('[@zjj/dsh-prompt-optimizer] webServer 不可用，跳过路由注册')
+    ctx?.logger?.warn?.('[@zjjlivingfree/dsh-prompt-optimizer] webServer 不可用，跳过路由注册')
     return
   }
   webServer.register({
@@ -981,5 +981,5 @@ export function apply(ctx: any) {
     path: ROUTE_PREFIX,
     handler: createHandler(),
   })
-  ctx?.logger?.info?.('[@zjj/dsh-prompt-optimizer] 路由已注册（引擎：llm 优先，规则回退）')
+  ctx?.logger?.info?.('[@zjjlivingfree/dsh-prompt-optimizer] 路由已注册（引擎：llm 优先，规则回退）')
 }

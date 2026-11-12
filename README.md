@@ -1,4 +1,4 @@
-# @zjj/dsh-prompt-optimizer
+# @zjjlivingfree/dsh-prompt-optimizer
 
 <p><strong>在 DSH Web 输入框旁注入「✨ 优化提示词」按钮：优先复用 DSH 已连接模型（<code>ctx.llm</code>）做语义级改写，不可用时自动回退本地规则引擎。</strong></p>
 
@@ -34,7 +34,7 @@
 
 ```sh
 # 从 npm 安装（推荐）
-dsh plugin --profile desktop add @zjj/dsh-prompt-optimizer
+dsh plugin --profile desktop add @zjjlivingfree/dsh-prompt-optimizer
 
 # 或装本地源码目录（开发时用，profile 会以 link: 方式指向它）
 dsh plugin --profile desktop add "D:/my-projects/plugins/dsh-prompt-optimizer"

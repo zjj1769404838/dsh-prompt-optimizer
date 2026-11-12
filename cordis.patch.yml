@@ -4,4 +4,4 @@
 # id 用短名即可（宿主只要求同 profile 内唯一）。
 - insert:
     - id: dsh-prompt-optimizer
-      name: '@zjj/dsh-prompt-optimizer'
+      name: '@zjjlivingfree/dsh-prompt-optimizer'

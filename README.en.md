@@ -1,4 +1,4 @@
-# @zjj/dsh-prompt-optimizer
+# @zjjlivingfree/dsh-prompt-optimizer
 
 <p><strong>Adds an “Optimize” button to the DSH Web composer: one click rewrites a rough request into a structured prompt, using the model DSH is already connected to (<code>ctx.llm</code>), with a local rule-based engine as fallback.</strong></p>
 
@@ -34,7 +34,7 @@ The response carries a `mode` field (`llm` / `local` / `none`) and the client to
 
 ```sh
 # from npm (recommended)
-dsh plugin --profile desktop add @zjj/dsh-prompt-optimizer
+dsh plugin --profile desktop add @zjjlivingfree/dsh-prompt-optimizer
 
 # or from a local source checkout (profile links to it)
 dsh plugin --profile desktop add "D:/my-projects/plugins/dsh-prompt-optimizer"

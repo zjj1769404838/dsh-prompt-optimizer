@@ -28,7 +28,7 @@
   },
   "plugins": [
     {
-      "name": "@zjj/dsh-prompt-optimizer",
+      "name": "@zjjlivingfree/dsh-prompt-optimizer",
       "title": {
         "en": "Prompt Optimizer",
         "zh": "提示词优化"

@@ -1,4 +1,4 @@
-// @zjj/dsh-prompt-optimizer client half
+// @zjjlivingfree/dsh-prompt-optimizer client half
 // 在 DSH Web 输入框左侧工具区注入「魔法棒 + 优化」按钮。
 // 定位走宿主 slot `conversation.input.left`（与 git 分支 chip 同一个槽位），
 // 由宿主按 order 排序渲染 —— 位置稳定，不会随 React 重渲染漂移。

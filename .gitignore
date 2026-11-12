@@ -1,10 +1,17 @@
+# dependencies
 node_modules/
-*.tgz
-*.log
-.DS_Store
 
-# 排障用的宿主产物提取目录（内含 DSH 宿主专有代码，绝不进仓库/发布包）
-.tmp-probe/
+# logs
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# local scratch / probes (never tracked)
 .scratch/
-*.bak
-package.json.bak-*
+
+# DSH session/panel logs
+.dsh-ops/

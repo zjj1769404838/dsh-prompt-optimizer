@@ -1,4 +1,4 @@
-# @zjj/dsh-prompt-optimizer 插件计划
+# @zjjlivingfree/dsh-prompt-optimizer 插件计划
 
 > 本插件由 DSH 插件开发助手（dsh-plugin-studio）生成并手工落地。
 > 每阶段决策确定后勾选对应项，未通过不得进入下一阶段。
